@@ -1,0 +1,125 @@
+# creator-insight 配置文件模板
+# 复制为 config/config.json 后填写
+{
+  "app": {
+    "host": "127.0.0.1",
+    "port": 8781,
+    "data_dir": "./data",
+    "log_level": "INFO"
+  },
+  "ai": {
+    "cloud": {
+      "provider": "openai-compatible",
+      "api_key": "",
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-v4-flash",
+      "max_tokens": 16384,
+      "chat_template_kwargs": {}
+    },
+    "local_fallback": {
+      "enabled": false,
+      "provider": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen2.5:7b-instruct-q4_K_M",
+      "_model_note": "本地 LLM 兜底。需先本地跑 Ollama：ollama pull qwen2.5:7b。可选：qwen2.5:3b/7b/14b、deepseek-r1:7b、llama3.1:8b 等"
+    },
+    "task_model_map": {
+      "summarize": "cloud",
+      "extract_claim": "cloud",
+      "extract_prediction": "cloud",
+      "parse_time": "cloud",
+      "verify": "cloud",
+      "simplify": "cloud"
+    }
+  },
+  "search": {
+    "provider": "tavily",
+    "tavily_api_key": "",
+    "fallback": "bing",
+    "max_results": 5
+  },
+  "market_data": {
+    "cn": "akshare",
+    "us": "yfinance"
+  },
+  "transcription": {
+    "prefer": "platform_subtitle",
+    "defaultProvider": "whisper",
+    "_provider_note": "本地转写通道：whisper（本地 faster-whisper）。参考 douyin-creator-distill",
+    "whisper": {
+      "model": "small",
+      "_model_note": "Whisper 模型档位：tiny(最快~39M)/base(~74M)/small(~244M,推荐平衡)/medium(~769M,更准)/large-v3(最准~1.5G)。首次运行自动下载，路径可设 HF_HOME 或下载到本地缓存",
+      "device": "auto",
+      "_device_note": "cpu（通用）/ auto（自动）/ cuda（NVIDIA GPU 加速，需 cuDNN）",
+      "compute_type": "int8",
+      "_compute_type_note": "CPU 用 int8（最快）；GPU 用 float16；更高精度可用 float32",
+      "language": "",
+      "_language_note": "可选 zh / en，留空则自动检测",
+      "retain_media": false,
+      "_retain_media_note": "false 则转写后删除中间音频（保留原始视频）"
+    },
+    "artifacts_dir": "./data/transcripts/whisper",
+    "_artifacts_note": "本地转写产物（正文 md / 逐段 json / 字幕 srt）落盘目录"
+  },
+  "platforms": {
+    "douyin": {
+      "enabled": true
+    },
+    "bilibili": {
+      "enabled": true
+    }
+  },
+  "obsidian": {
+    "vault_path": "",
+    "root_folder": "creator-insight",
+    "write_enabled": false,
+    "sync_predictions": true,
+    "sync_verifications": true
+  },
+  "verification": {
+    "auto_apply": true,
+    "auto_apply_min_confidence": 0.85,
+    "auto_apply_undo_hours": 24,
+    "human_review_required": true,
+    "sample_size_threshold": 30,
+    "scheduler_enabled": true,
+    "scheduler_interval_sec": 3600
+  },
+  "monitor": {
+    "enabled": true,
+    "max_pages": 20,
+    "per_page": 18,
+    "douyin_cookie": "",
+    "_douyin_cookie_note": "可选：抖音登录后的 cookie（'k1=v1; k2=v2'）。留空时 adapter 会自动用 playwright 驱动系统 Chrome/Edge 生成 cookie（需已安装 playwright），实现免配置下载",
+    "profile_path": "",
+    "_profile_path_note": "可选：已登录抖音的 Chrome user-data-dir（参考 douyin-creator-distill）。批量抓取博主目录被 a_bogus 风控时，用该登录态 profile 通过 Playwright 拦截目录 API 抓取。示例：C:/Users/xxx/AppData/Local/Google/Chrome/User Data/DouyinScraper"
+  },
+  "notify": {
+    "enabled": true,
+    "channels": ["local"],
+    "webhook_url": "",
+    "_webhook_note": "可选：每个触发事件会向该地址 POST {title, body, category, payload, sent_at}",
+    "smtp": {
+      "host": "",
+      "port": 465,
+      "user": "",
+      "password": "",
+      "from_name": "creator-insight",
+      "to": "",
+      "use_ssl": true
+    }
+  },
+  "semantic_search": {
+    "enabled": true,
+    "active_model": "high_precision",
+    "model_root": "./data/models/embedding",
+    "source": "modelscope",
+    "model_path": "",
+    "_model_path_note": "本地 embedding 模型目录（sentence-transformers 兼容，含 model.safetensors）。可指向 douyin-creator-distill 的 runtime/models/embedding/high_precision",
+    "model_id": "high_precision",
+    "dimension": 1024,
+    "device": "cpu",
+    "batch_size": 16,
+    "_note": "本地语义检索（参考 douyin-creator-distill）：可选轻量/高精度模型；embedder 走本地 sentence-transformers 离线推理，生成向量用于智能检索"
+  }
+}

@@ -1,0 +1,29 @@
+# ── creator-insight ─────────────────────────────
+# 运行时 / 数据（含敏感信息，绝不入库）
+data/
+config/config.json
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Node / 前端构建产物
+node_modules/
+static/vue/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# 浏览器自动化调试残留
+.playwright-cli/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
