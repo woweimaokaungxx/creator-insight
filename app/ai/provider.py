@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -157,11 +158,84 @@ class OllamaProvider(AIProvider):
             raise RuntimeError(f"Ollama 调用失败: {e}") from e
 
 
+# ─── AI 每日用量上限与告警（docs/14 风险#14：API 成本失控）──────
+_USAGE_FILE_NAME = "ai_usage.json"
+
+
+def _usage_file():
+    return config.data_dir / _USAGE_FILE_NAME
+
+
+def _load_usage() -> dict:
+    """读取今日用量；跨日自动归零"""
+    today = time.strftime("%Y-%m-%d")
+    try:
+        f = _usage_file()
+        if f.exists():
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("date") == today:
+                return data
+    except Exception:
+        pass
+    return {"date": today, "count": 0, "warned": False}
+
+
+def _save_usage(data: dict) -> None:
+    try:
+        _usage_file().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        print(f"[ai] 用量计数写入失败: {exc}")
+
+
+def current_usage() -> dict:
+    """今日用量快照（供设置页展示）"""
+    return _load_usage()
+
+
+def _push_usage_warning(count: int, threshold: int) -> None:
+    try:
+        from ..services.notify import send_notification  # 延迟导入避免循环
+        send_notification(
+            title="AI 用量告警",
+            body=f"今日 AI 调用已达 {count} 次（告警阈值 {threshold} 次），请注意成本。",
+            category="manual",
+        )
+    except Exception as exc:
+        print(f"[ai] 用量告警推送失败: {exc}")
+
+
+def _guard_usage() -> None:
+    """调用前校验每日上限；达到告警阈值时推送一次通知"""
+    limit = int(config.get("ai", "daily_call_limit", default=0) or 0)
+    warn = int(config.get("ai", "daily_call_warn", default=0) or 0)
+    if limit <= 0 and warn <= 0:
+        return
+    usage = _load_usage()
+    if limit > 0 and int(usage.get("count", 0)) >= limit:
+        raise RuntimeError(
+            f"已达每日 AI 调用上限（{limit} 次）。可在「系统设置」调整 ai.daily_call_limit，或次日再试"
+        )
+    usage["count"] = int(usage.get("count", 0)) + 1
+    if warn > 0 and not usage.get("warned") and usage["count"] >= warn:
+        usage["warned"] = True
+        _push_usage_warning(usage["count"], warn)
+    _save_usage(usage)
+
+
 class AIGateway:
     """任务→模型路由（config.task_model_map）+ 云端/本地兜底"""
 
     def __init__(self):
         self._cache: dict[str, AIProvider] = {}
+        self._init_providers()
+
+    def reload(self) -> None:
+        """重新读取配置重建 provider（设置页改配置后调用）。
+
+        注意：必须**原地**更新（清空 + 重建），不能重新赋值模块级单例——
+        其它模块在导入时已绑定该对象引用，重新赋值不会生效。
+        """
+        self._cache.clear()
         self._init_providers()
 
     def _init_providers(self):
@@ -192,6 +266,7 @@ class AIGateway:
     def chat(self, system: str, user: str, task: str,
              json_mode: bool = True, **kw) -> tuple[dict[str, Any], str]:
         """返回 (result, provider_name)，按 task_model_map 路由"""
+        _guard_usage()   # 每日用量上限与告警（docs/14 风险#14）
         route = config.get("ai", "task_model_map", default={}).get(task, "cloud")
         order = []
         if route == "local":

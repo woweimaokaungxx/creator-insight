@@ -1,8 +1,8 @@
 # creator-insight 项目历史与改进记录（CHANGELOG）
 
 > 博主观点 → 预测 → 事实验证 → 可信度追踪系统
-> 本文记录项目从 2026-08-23 起的全部开发历程、每版改动与 V0.8 清理内容。
-> 最后更新：2026-08-29（V0.8 清理 + 提示词增强）
+> 本文记录项目从 2026-08-23 起的全部开发历程、每版改动与清理内容。
+> 最后更新：2026-09-12（V0.12 系统设置页 + V0.11 账号登录态 / AI 切换 MiMo / SPA 路由回退）
 
 ---
 
@@ -20,7 +20,7 @@ Creator → Content → Transcript → Claim → Prediction → Evidence → Ver
 - 领域：财经 + 科技 + 职场科普
 - 输入：手动粘贴 URL 或分享文案
 - 转写：原生字幕优先 + Whisper 本地兜底
-- AI：云端 DeepSeek 为主 + 本地 Ollama 兜底
+- AI：云端 OpenAI 兼容服务（当前小米 MiMo `mimo-v2.5`）+ 本地 Ollama 兜底
 - 存储：SQLite 主存 + Markdown 视图
 - 形态：本地 Web App（FastAPI + Vue3 前端）
 
@@ -41,6 +41,10 @@ Creator → Content → Transcript → Claim → Prediction → Evidence → Ver
 | V0.7 | 8-29 | 预测抽取三连优化：意图门控 / AI 置信度 / 幅度结构化 |
 | V0.7+ | 8-29 | 时间解析激活 + 博主画像上下文校准 |
 | V0.8 | 8-29 | 提示词增强（总结/观点抽取）+ 预测空值兜底 + 项目清理 |
+| V0.9 | 9-10 | 预测展示统一：AI 总结为主 / 原话为辅 + 未总结标记 |
+| V0.10 | 9-11 ~ 9-12 | 仪表盘真实创作者数据 + 头像放大 + 固定导航布局 |
+| V0.11 | 9-12 | 抖音账号登录态（登录 + Cookie 四级策略）+ AI 切换小米 MiMo + SPA 路由回退 |
+| V0.12 | 9-12 | 系统设置页（配置中心）+ 保存即生效热重载 + AI 每日用量上限与告警 |
 
 ---
 
@@ -272,7 +276,95 @@ Creator → Content → Transcript → Claim → Prediction → Evidence → Ver
 
 ---
 
-## 五、当前项目结构（V0.8 清理后）
+## 五、V0.9 ~ V0.12 改动详情（9-10 ~ 9-12）
+
+### V0.9 预测展示统一为「AI 总结为主、博主原话为辅」（9-10）
+
+**问题**：多处界面仍在展示博主**原话**（`raw_text`），句子口语化、可读性差。库里同时存在 `raw_text`（原话）与 `interpreted_intent`（AI 总结），但展示层优先用了前者。
+
+**改动**：
+
+| 位置 | 改动 |
+|------|------|
+| `src/pages/Predictions.vue` | 预测内容单元格主文本 = `interpreted_intent`；原话降级为灰色引用行；**缺总结的老数据显示「未总结」黄色标记** |
+| `src/pages/Creators.vue` | 已验证预测表同步（主文本=总结，无总结打标记） |
+| `src/pages/Library.vue` | 语义检索命中 prediction：主标题 = AI 总结，新增「来自视频：xxx」行，原话作灰色小字（悬停看全文） |
+| `app/services/semantic/service.py` | 索引文本改为「**AI 总结优先 + 原话兜底**」（两者都索引，兼容不同措辞命中）；`search` 返回 prediction 补 `video_title` / `due_at` / `content_id` / `url` |
+| `app/services/verification.py` | 验证队列查询补 `interpreted_intent` |
+| `src/api/client.ts` | `SemanticResult` 新增 `video_title` / `due_at` / `content_id` |
+
+### V0.10 仪表盘真实数据 + 头像放大 + 固定导航（9-11 ~ 9-12）
+
+**仪表盘创作者卡片去假数据**：
+
+- 问题：`Dashboard.vue` 的「创作者可信度画像」卡片是**硬编码假数据**（假博主"价值研究员 Leo"、字母头像、假统计），与库中真实创作者无关
+- `app/main.py`：`/api/dashboard` 新增 `featured_creator`（优先取已验证样本最多者）与 `calibration_points`（逐条真实校准点）
+- `src/pages/Dashboard.vue`：卡片改真实数据（真实头像 / 正确率 / 样本量 / Brier，无数据显示 `-`），补空态提示；分领域正确率图与校准散点图改真实数据源（无数据显示空态说明）
+- `src/api/client.ts`：新增 `DashboardCreator` 类型，`DashboardData` 补 `featured_creator`
+- `src/pages/Creators.vue`：列表头像由 40px 放大到 **56px**
+
+**固定导航布局**（`src/layouts/Layout.vue`）：
+
+- 整页锁死视口：`html/body` 禁止整页滚动，`.app-shell` 固定 `100vh`
+- 左侧导航栏固定：`height:100vh + overflow-y:auto`（菜单过长时侧栏内部滚动，不随内容滚动）
+- 顶栏固定：`.topbar` `flex:0 0 auto`
+- 仅内容区滚动：`.content` `flex:1 + min-height:0 + overflow-y:auto`
+- 效果：滚动右侧内容时，左侧导航与顶部栏保持不动
+
+### V0.11 抖音账号登录态 + AI 厂商切换 + SPA 回退（9-12）
+
+**抖音账号与登录态**（详见 `docs/20-账号与登录态.md`）：
+
+- `scripts/douyin_login.py`：可见浏览器扫码登录 → 每 5 秒轮询判定（接口状态码 2483 = 未登录）→ 导出 Netscape Cookie → 写状态文件 → 自动关窗
+- `app/services/account.py`：账号总览（**脱敏**）、Cookie 手动写入与 Netscape 导出、浏览器目录读写、登录子进程与状态管理
+- Cookie 策略由三级升级为**四级**：手动配置 → **登录态文件** → 匿名缓存 → 现场生成；主页目录抓取优先复用登录态
+- 6 个接口：`GET/POST /api/account`、`POST /api/account/cookie`、`POST /api/account/login`、`GET /api/account/login/status`、`POST /api/account/export-cookie`
+- 前端 `src/components/DouyinAccountCard.vue`：挂在「自动监控」页顶部（状态徽标 + Cookie 写入 + 目录配置 + 登录轮询）
+- **顺带修复两个隐患**：① `_cookie_file_to_dict` 默认参数会丢弃 session cookie（`expires=0`，而抖音登录态大量关键 Cookie 正是 session cookie）→ 改 `ignore_discard=True, ignore_expires=True`；② Windows 下 `write_text` 会把 `\n` 转 `\r\n` 污染 Cookie 值 → 统一 `newline="\n"`
+
+**AI 厂商切换为小米 MiMo**：
+
+- `config/config.json` 的 `ai.cloud`：`base_url` → `https://api.xiaomimimo.com/v1`、`model` → `mimo-v2.5`、`api_key` → MiMo 控制台申请
+- 实测兼容（Bearer 鉴权 + 流式 + `response_format: json_object`），6 组 AI 任务全部可用
+
+**SPA 路由回退**：
+
+- `app/main.py` 新增 404 处理器：前端子路由（`/monitoring`、`/predictions` 等）返回 `index.html`，刷新不再 404；`/api`、`/assets`、`/static`、`/avatars` 前缀保持原行为
+
+**技术栈文档校正**：`docs/12-tech-stack.md` 已与实现脱节（前端/ AI / 配置三处），本次同步更正。
+
+### V0.12 系统设置页（配置中心）（9-12）
+
+**问题**：修改 AI 密钥 / 通知 / Obsidian / 验证参数等配置**只能手改 `config/config.json`**，无任何界面。
+
+**后端**：
+
+- `app/services/settings.py`：脱敏读取（密钥只返回掩码）、掩码保留写入、**深合并**、热重载调度、AI 连通性测试
+- `app/ai/provider.py`：新增 `AIGateway.reload()`（原地重建 provider）；**每日 AI 调用上限与告警**（补齐 `docs/14` 风险 #14：API 成本失控）
+- `app/services/obsidian.py`：新增 `ObsidianAdapter.reload()`
+- 3 个接口：`GET /api/settings`、`PATCH /api/settings`、`POST /api/settings/ai/test`
+
+**前端**：
+
+- 新增 `src/pages/Settings.vue` + `src/pages/settingsSchema.ts`（分组 schema，便于扩展字段）
+- `App.vue` / `Layout.vue` / `client.ts` 注册「系统设置」页与左侧「系统」组菜单入口
+- 页面含运行状态卡（云端/本地 AI、Obsidian、今日用量）+ 9 个分组表单 + 「测试 AI 连接」/「保存全部」
+
+**关键设计（三个坑）**：
+
+1. **保存即生效需要原地 reload**：`ai_gateway` / `obsidian` 在**导入时**就把配置缓存进对象；其它模块 `from ..ai.provider import ai_gateway` 已绑定引用，若重新赋值模块级变量则**不生效** → 采用实例 `reload()` 原地更新
+2. **掩码保留**：密钥字段留空或提交掩码 → 保持原值；`null` → 显式清空（避免前端把掩码写进配置）
+3. **浅更新陷阱**：`config.update_section` 是浅更新，直接提交 `{"cloud": {"model": "x"}}` 会**替换整个 cloud 子段**、丢失 api_key/base_url → 写入前深合并；并把「把嵌套段写成标量」判为非法
+
+**实测**：
+
+- ✅ V0.7 回归 29/29（脱敏 / 掩码保留 / 深合并 / 落盘 / 热重载 / 用量上限 / 非法输入）
+- ✅ 页面「测试 AI 连接」→ `provider=cloud`，返回 `{"ok":true,"msg":"pong"}`
+- ✅ 页面「保存全部」后：密钥未被掩码覆盖、12 个配置段完整、仅新增 2 个预期字段
+
+---
+
+## 六、当前项目结构（V0.8 清理后）
 
 ```
 creator-insight/
@@ -309,7 +401,7 @@ creator-insight/
 
 ---
 
-## 六、测试体系
+## 七、测试体系
 
 | 脚本 | 覆盖 | 数量 |
 |------|------|------|
@@ -318,14 +410,16 @@ creator-insight/
 | `v03_test.py` | 硬预测自动过 + 24h 撤销 + 画像分桶/Brier | 43 |
 | `v04_test.py` | 通知中心多通道 + 触发点 | 22 |
 | `v05_test.py` | 异步 ingest 任务 + 简体文案保存 | 27 |
+| `v06_test.py` | 抖音账号与登录态：脱敏/配置与文件双写/四级优先级/登录状态机 | 26 |
+| `v07_test.py` | 系统设置：脱敏/掩码保留/深合并/落盘/热重载/用量上限/非法输入 | 29 |
 | `ai_evidence_test.py` | AI 生成证据链兜底 | 8 |
-| **合计** | | **131** |
+| **合计** | | **186** |
 
 > 测试使用 `CI_APP__DATA_DIR` 临时目录，不污染真实库。
 
 ---
 
-## 七、已知限制（设计使然）
+## 八、已知限制（设计使然）
 
 - **AI 生成证据只对历史预测有效**：AI 知识有截止日期；近期预测需真实搜索或人工证据
 - **Tavily 未配置**：搜索框留空，近实时预测需人工贴证据
@@ -334,7 +428,7 @@ creator-insight/
 
 ---
 
-## 八、待办 / 路线图
+## 九、待办 / 路线图
 
 | 优先级 | 事项 |
 |--------|------|

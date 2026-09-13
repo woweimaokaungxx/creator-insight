@@ -454,3 +454,102 @@ export function semanticSelectModel(modelId: string) {
 export function semanticDownloadModel(modelId: string) {
   return request<SemanticSettings>(`/semantic/download?model_id=${encodeURIComponent(modelId)}`, { method: 'POST' });
 }
+
+// ─── 抖音账号与登录态 ─────────────────────────────────
+export type LoginPhase =
+  | 'idle'
+  | 'launching_login'
+  | 'waiting_for_login'
+  | 'login_ready'
+  | 'browser_closed'
+  | 'helper_timeout'
+  | 'helper_error';
+
+export interface AccountLoginStatus {
+  phase: LoginPhase;
+  ready: boolean;
+  verified_at: string | null;
+  status_code: number | null;
+  error: string | null;
+  updated_at: number | null;
+  [key: string]: unknown;
+}
+
+export interface AccountOverview {
+  login: AccountLoginStatus;
+  cookie: { configured: boolean; source: 'manual' | 'login' | 'auto' | 'none'; count: number };
+  profile: { configured: boolean; dir_name: string; exists: boolean };
+  [key: string]: unknown;
+}
+
+export function getAccountOverview() {
+  return request<AccountOverview>('/account');
+}
+
+export function saveAccountConfig(profilePath: string) {
+  return request<{ ok: boolean; dir_name: string }>('/account', {
+    method: 'POST',
+    body: JSON.stringify({ profile_path: profilePath }),
+  });
+}
+
+export function saveAccountCookie(cookie: string) {
+  return request<{ ok: boolean; count: number }>('/account/cookie', {
+    method: 'POST',
+    body: JSON.stringify({ cookie }),
+  });
+}
+
+export function startAccountLogin(profilePath = '') {
+  return request<{ ok: boolean; phase: LoginPhase; already_open: boolean }>('/account/login', {
+    method: 'POST',
+    body: JSON.stringify({ profile_path: profilePath }),
+  });
+}
+
+export function getAccountLoginStatus() {
+  return request<AccountLoginStatus>('/account/login/status');
+}
+
+export function exportAccountCookie() {
+  return request<{ ok: boolean; file: string; count: number }>('/account/export-cookie', {
+    method: 'POST',
+  });
+}
+
+// ─── 系统设置（配置中心）──────────────────────────────
+export interface SettingsRuntime {
+  ai_cloud: boolean;
+  ai_local: boolean;
+  obsidian_active: boolean;
+  ai_usage_today: number;
+  ai_usage_date: string | null;
+  [key: string]: unknown;
+}
+
+export interface SettingsResponse {
+  config: Record<string, any>;
+  secrets_configured: Record<string, boolean>;
+  mask: string;
+  restart_required_fields: string[];
+  runtime: SettingsRuntime;
+  [key: string]: unknown;
+}
+
+export function getSettings() {
+  return request<SettingsResponse>('/settings');
+}
+
+export function updateSettings(patch: Record<string, unknown>) {
+  return request<{ ok: boolean; applied: string[]; settings: SettingsResponse }>('/settings', {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function testAiConnection() {
+  return request<{ ok: boolean; provider: string; sample: Record<string, unknown> }>(
+    '/settings/ai/test',
+    { method: 'POST' },
+  );
+}

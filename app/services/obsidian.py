@@ -21,7 +21,12 @@ FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.S)
 
 class ObsidianAdapter:
     def __init__(self):
-        self.root = Path(config.get("obsidian", "vault_path", default="")) if config.get("obsidian", "vault_path") else None
+        self.reload()
+
+    def reload(self) -> None:
+        """重新读取配置（设置页改配置后调用；原地更新，引用不变）"""
+        vault = config.get("obsidian", "vault_path", default="")
+        self.root = Path(vault) if vault else None
         self.folder = str(config.get("obsidian", "root_folder", default="creator-insight"))
         self.enabled = bool(config.get("obsidian", "write_enabled", default=False))
         if self.root and self.root.exists():

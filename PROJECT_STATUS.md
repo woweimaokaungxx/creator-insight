@@ -1,17 +1,17 @@
 # creator-insight · 项目状态总结
 
 > 博主观点 → 预测 → 事实验证 → 可信度追踪系统
-> 更新日期：2026-08-26（V0.4 通知环节 落地）
+> 更新日期：2026-09-12（V0.11 抖音账号登录态 + AI 切换小米 MiMo + SPA 路由回退）
 
 ---
 
 ## 〇、当前状态总览
 
 ```
-服务运行中：http://127.0.0.1:8781（v0.6.0，AI 云端已连接）
-代码规模：约 3700 行
-测试：131 项全绿（smoke 16 + v02 15 + v03 43 + v04 22 + v05 27 + ai_evidence 8）
-数据库：2 条预测待确认 / 1 条已 final
+服务运行中：http://127.0.0.1:8781（AI 云端 = 小米 MiMo `mimo-v2.5`）
+代码规模：约 5200 行
+测试：186 项全绿（smoke 16 + v02 15 + v03 43 + v04 22 + v05 27 + v06 26 + v07 29 + ai_evidence 8）
+数据库：28 条预测
 ```
 
 ---
@@ -472,6 +472,104 @@ POST   /api/notifications/test       # 人工触发测试通知（验证各通�
 ```
 
 配置（`config.json` → `notify` 段）：`enabled` / `channels`（如 `["local","webhook"]`）/ `webhook_url` / `smtp`（host/port/user/password/from_name/to/use_ssl）。
+
+### 24. 抖音账号与登录态（9-12，参考 douyin-creator-distill 账号体系）
+
+**问题**：抖音抓取此前只有匿名 Cookie（headless 现场生成），登录态需用户自己在外部浏览器登录再手改 `config.json`；也没有任何账号相关 API。
+
+| 模块 | 说明 |
+|------|------|
+| `scripts/douyin_login.py` | 独立登录脚本：`launch_persistent_context(headless=False)` 打开可见浏览器 → 打开抖音 → 每 5 秒轮询登录态（接口状态码 2483 = 未登录）→ 成功后导出 Netscape Cookie + 写状态 → 自动关窗；默认 15 分钟超时 |
+| `app/services/account.py` | 账号总览（脱敏）、Cookie 手动写入与 Netscape 导出、浏览器目录读写、登录子进程启动与状态管理（进程存活判定防重复启动、Cookie 文件原子写入） |
+| `app/adapters/douyin.py` | Cookie 策略由三级升级为**四级**：手动配置 → **登录态文件** → 匿名缓存 → 现场生成；主页抓取优先复用登录态 |
+| 6 个接口 | `GET/POST /api/account`、`POST /api/account/cookie`、`POST /api/account/login`、`GET /api/account/login/status`、`POST /api/account/export-cookie` |
+| 前端 | 新增 `src/components/DouyinAccountCard.vue`，挂在「自动监控」页顶部：状态徽标 + 提示条 + 目录/Cookie 表单 + 4 个操作按钮 + 登录进度（3 秒轮询） |
+| 配置 | `config.example.json` 新增 `account` 段（开关 / 超时 / 默认目录）；`.gitignore` 显式忽略登录态产物 |
+| 文档 | `docs/20-账号与登录态.md` |
+
+**顺带修复的两个隐患**：
+
+1. `_cookie_file_to_dict` 用默认参数加载 Netscape 文件会**丢弃 session cookie**（`expires=0`），而抖音登录态里大量关键 Cookie 正是 session cookie → 改为 `ignore_discard=True, ignore_expires=True`。
+2. Windows 下 `write_text` 会把 `\n` 转成 `\r\n`，导致 Cookie 值尾部带 `\r` → 统一使用 `newline="\n"` 写入。
+
+**实测**：
+
+- ✅ V0.6 回归 26/26 通过（脱敏 / 配置与文件双写 / Netscape 格式 / 四级优先级 / 登录状态机 / 非法输入）
+- ✅ 前端卡片：点击「打开登录窗口」→ 徽标 `未登录` → `等待扫码登录`（轮询正常）；清理后恢复 `未登录`
+- ✅ 非法 Cookie 提交返回 409 且不落库
+
+### 25. 预测展示统一为「AI 总结为主、原话为辅」（9-10）
+
+**问题**：多处界面仍在展示博主**原话**（`raw_text`），可读性差；库里 `raw_text` 与 `interpreted_intent` 并存但展示层优先用了前者。
+
+| 位置 | 改动 |
+|------|------|
+| `Predictions.vue` | 主文本 = `interpreted_intent`；原话降级为灰色引用行；缺总结的老数据显示「未总结」标记 |
+| `Creators.vue` | 已验证预测表同步（主文本=总结，无总结打标记） |
+| `Library.vue` | 语义检索命中 prediction：标题 = AI 总结，新增「来自视频：xxx」行，原话作灰色小字 |
+| `app/services/semantic/service.py` | 索引文本改为「总结优先 + 原话兜底」；`search` 返回补 `video_title` / `due_at` / `content_id` / `url` |
+| `app/services/verification.py` | 验证队列查询补 `interpreted_intent` |
+| `src/api/client.ts` | `SemanticResult` 新增 `video_title` / `due_at` / `content_id` |
+
+**实测**：语义检索「供应商」命中预测，`title` 已返回 AI 总结、`video_title` 为所属视频、`raw_text` 为原话。
+
+### 26. 仪表盘真实数据 + 头像放大 + 固定导航布局（9-11 ~ 9-12）
+
+**仪表盘创作者卡片去假数据**（此前整块是硬编码假博主"价值研究员 Leo" + 字母头像）：
+
+- `app/main.py`：`/api/dashboard` 新增 `featured_creator`（优先取已验证样本最多者）与 `calibration_points`（逐条真实校准点）
+- `src/pages/Dashboard.vue`：卡片接真实数据（真实头像 / 正确率 / 样本量 / Brier，无数据显示 `-`），补空态提示；分领域正确率图与校准散点图改真实数据源
+- `src/pages/Creators.vue`：列表头像由 40px 放大到 **56px**
+
+**固定导航布局**（`src/layouts/Layout.vue`）：
+
+- `html/body` 禁止整页滚动；`.app-shell` 锁定 `100vh`
+- 侧栏 `height:100vh + overflow-y:auto`（菜单过长时内部滚动）；顶栏 `flex:0 0 auto`
+- 仅 `.content` `flex:1 + min-height:0 + overflow-y:auto` 内部滚动
+- **效果**：滚动右侧内容时，左侧导航栏与顶栏固定不动
+
+**实测**：`/api/dashboard` 返回真实创作者（老陈讲财经：1 条已验证、正确率 50%），不再是假 Leo。
+
+### 27. AI 切换小米 MiMo + SPA 路由回退 + 技术栈文档校正（9-12）
+
+**AI 厂商切换**：
+
+- `config/config.json` 的 `ai.cloud`：`base_url` → `https://api.xiaomimimo.com/v1`、`model` → `mimo-v2.5`、`api_key` → MiMo 控制台申请
+- **实测**：简单 JSON 输出与真实总结任务均走 `cloud` 成功，兼容 Bearer 鉴权 + 流式 + `response_format: json_object`
+
+**SPA 路由回退**：
+
+- `app/main.py` 新增 404 处理器：前端子路由返回 `index.html`；`/api`、`/assets`、`/static`、`/avatars` 前缀保持原行为
+- **实测**：`/monitoring`、`/predictions`、`/library`、`/deep/nested/route` 均 200 HTML；`/api/nonexistent` 仍 404 JSON
+
+**技术栈文档校正**（`docs/12-tech-stack.md`）：前端（htmx → Vue3+Vite）、AI（DeepSeek → OpenAI 兼容/当前 MiMo）、配置管理（多文件 → 单一 `config.json`）三处与实现对齐。
+
+### 28. 系统设置页（配置中心）（9-12，V0.12）
+
+**需求**：此前修改 AI 密钥 / 通知 / Obsidian / 验证参数等配置**只能手改 `config/config.json`**。
+
+| 模块 | 说明 |
+|------|------|
+| `app/services/settings.py` | 脱敏读取（密钥只返回掩码）、掩码保留写入、**深合并**、热重载调度、AI 连通性测试 |
+| `app/ai/provider.py` | 新增 `AIGateway.reload()`；**每日 AI 调用上限与告警**（补齐 docs/14 风险#14） |
+| `app/services/obsidian.py` | 新增 `ObsidianAdapter.reload()` |
+| 3 个接口 | `GET /api/settings`、`PATCH /api/settings`、`POST /api/settings/ai/test` |
+| 前端 | `src/pages/Settings.vue` + `src/pages/settingsSchema.ts`；左侧「系统」组新增「系统设置」入口 |
+| 文档 | `docs/21-系统设置.md`；`config.example.json` 补 `ai.daily_call_limit` / `daily_call_warn` |
+
+**关键设计**：
+
+- **保存即生效**：`ai_gateway` / `obsidian` 是**导入时缓存**的单例，采用**原地 `reload()`**（引用不变）而非重新赋值——后者因其它模块已绑定旧引用而不会生效
+- **掩码保留**：密钥字段留空或提交掩码 → 保持原值；`null` → 显式清空
+- **深合并**：`config.update_section` 是**浅更新**，若直接提交 `{"cloud": {"model": "x"}}` 会替换整个 cloud 子段、丢失 api_key/base_url → 写入前深合并；并把「把嵌套段写成标量」判为非法输入
+- **配置边界**：JSON 承载的是**配置与运行状态**，业务数据仍全程 SQLite（不违反 docs/13 的数据交换约束）
+- **用量上限**：计数落盘 `data/ai_usage.json`（跨日归零），校验挂在 `AIGateway.chat()` 统一入口
+
+**实测**：
+
+- ✅ V0.7 回归 29/29（脱敏 / 掩码保留 / 深合并 / 落盘 / 热重载 / 用量上限 / 非法输入）
+- ✅ 页面「测试 AI 连接」→ `provider=cloud`，返回 `{"ok":true,"msg":"pong"}`
+- ✅ 页面「保存全部」后：**密钥未被掩码覆盖**（仍是真实 key）、12 个配置段完整、仅新增 2 个预期字段
 
 ---
 

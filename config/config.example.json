@@ -13,6 +13,7 @@
       "api_key": "",
       "base_url": "https://api.deepseek.com",
       "model": "deepseek-v4-flash",
+      "_cloud_note": "云端大模型（OpenAI 兼容协议 + Bearer 鉴权 + 流式 + json_object）。可替换为任意兼容服务，例如小米 MiMo：base_url 改 https://api.xiaomimimo.com/v1、model 改 mimo-v2.5（或 mimo-v2.5-pro），api_key 填控制台申请的 sk- 开头 Key",
       "max_tokens": 16384,
       "chat_template_kwargs": {}
     },
@@ -30,7 +31,11 @@
       "parse_time": "cloud",
       "verify": "cloud",
       "simplify": "cloud"
-    }
+    },
+    "daily_call_limit": 0,
+    "_daily_call_limit_note": "每日 AI 调用上限（0=不限）。达到上限后 AI 调用被拒绝，用于成本控制（docs/14 风险#14）。计数存 data/ai_usage.json，跨日自动归零",
+    "daily_call_warn": 0,
+    "_daily_call_warn_note": "AI 用量告警阈值（0=不告警）。当日调用达到该次数时推送一条通知"
   },
   "search": {
     "provider": "tavily",
@@ -85,14 +90,23 @@
     "scheduler_enabled": true,
     "scheduler_interval_sec": 3600
   },
+  "account": {
+    "enabled": true,
+    "_enabled_note": "抖音账号与登录态功能开关（前端「自动监控」页 → 抖音账号与登录态卡片）。关闭后 /api/account/login 会拒绝启动登录窗口",
+    "login_timeout_sec": 900,
+    "_login_timeout_note": "打开登录窗口后等待扫码的超时秒数（默认 900 = 15 分钟），超时后窗口自动关闭并标记为已超时",
+    "default_profile_dir": "",
+    "_default_profile_dir_note": "登录态浏览器目录；留空则使用 data/browser_profile/douyin。登录成功后该目录会自动写入 monitor.profile_path，供目录抓取复用",
+    "_note": "登录会在本机打开可见浏览器窗口扫码；登录态保存到专用 Chrome 目录，并导出 Cookie 到 data/cookies/douyin_login.txt。二者均含登录凭据，不进入 Git"
+  },
   "monitor": {
     "enabled": true,
     "max_pages": 20,
     "per_page": 18,
     "douyin_cookie": "",
-    "_douyin_cookie_note": "可选：抖音登录后的 cookie（'k1=v1; k2=v2'）。留空时 adapter 会自动用 playwright 驱动系统 Chrome/Edge 生成 cookie（需已安装 playwright），实现免配置下载",
+    "_douyin_cookie_note": "可选：抖音登录后的 cookie（'k1=v1; k2=v2'）。可在前端「自动监控」页的账号卡片手动写入，无需手改本文件；留空时 adapter 会自动用 playwright 驱动系统 Chrome/Edge 生成匿名 cookie（需已安装 playwright）",
     "profile_path": "",
-    "_profile_path_note": "可选：已登录抖音的 Chrome user-data-dir（参考 douyin-creator-distill）。批量抓取博主目录被 a_bogus 风控时，用该登录态 profile 通过 Playwright 拦截目录 API 抓取。示例：C:/Users/xxx/AppData/Local/Google/Chrome/User Data/DouyinScraper"
+    "_profile_path_note": "可选：已登录抖音的 Chrome user-data-dir（参考 douyin-creator-distill）。可点击前端账号卡片的「打开登录窗口」自动写入。批量抓取博主目录被 a_bogus 风控时，用该登录态 profile 通过 Playwright 拦截目录 API 抓取。示例：C:/Users/xxx/AppData/Local/Google/Chrome/User Data/DouyinScraper"
   },
   "notify": {
     "enabled": true,

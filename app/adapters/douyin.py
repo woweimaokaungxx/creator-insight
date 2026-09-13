@@ -1,10 +1,11 @@
 """抖音 Adapter：分享文案/URL 解析、元数据、字幕获取
 
 下载依赖：yt-dlp（必需）+ playwright + 系统 Chrome/Edge（可选，自动生成 cookie 时用）。
-抖音对匿名请求风控严格，本 adapter 提供三级 cookie 策略：
-  1. config.json 的 monitor.douyin_cookie（手动配置，优先级最高）
-  2. data/cookies/douyin_{vid}.txt（上次自动生成的缓存）
-  3. playwright 驱动系统 Chrome/Edge 现场生成（自动兜底）
+抖音对匿名请求风控严格，本 adapter 提供四级 cookie 策略：
+  1. config.json 的 monitor.douyin_cookie（账号页手动写入，优先级最高）
+  2. data/cookies/douyin_login.txt（浏览器登录态导出的 Cookie，含登录身份）
+  3. data/cookies/douyin_{vid}.txt（上次自动生成的匿名缓存）
+  4. playwright 驱动系统 Chrome/Edge 现场生成匿名 Cookie（自动兜底）
 """
 from __future__ import annotations
 
@@ -118,10 +119,18 @@ class DouyinAdapter(PlatformAdapter):
             raw_input=raw,
         )
 
-    # ─── 抖音 cookie 策略（手动配置 → 本地缓存 → playwright 自动生成）──
+    # ─── 抖音 cookie 策略（手动配置 → 登录态 → 本地缓存 → playwright 自动生成）──
     def _cookie_file(self, vid: str) -> Path:
         """自动生成 cookie 的本地缓存路径（Netscape 格式，供 yt-dlp 用）"""
         return (config.data_dir / "cookies" / f"douyin_{vid}.txt")
+
+    def _login_cookie_file(self) -> Path:
+        """登录态 Cookie 文件（账号页「打开登录窗口」/「导出 Cookie」写入）
+
+        文件名与 app/services/account.py 的 LOGIN_COOKIE_NAME 保持一致；
+        为免 adapters 反向依赖 services 造成循环导入，此处独立声明。
+        """
+        return (config.data_dir / "cookies" / "douyin_login.txt")
 
     def _config_cookies(self) -> dict:
         """从 config.json monitor.douyin_cookie 解析出 cookie 字典"""
@@ -227,7 +236,8 @@ class DouyinAdapter(PlatformAdapter):
                     exp = 0
                 lines.append(f"{dom}\t{flag}\t{path}\t{secure}\t{exp}\t"
                              f"{c.get('name', '')}\t{c.get('value', '')}")
-            cookie_file.write_text("\n".join(lines), encoding="utf-8")
+            # newline="\n" 避免 Windows 写入 \r\n 污染 Cookie 值尾部
+            cookie_file.write_text("\n".join(lines), encoding="utf-8", newline="\n")
             print(f"[douyin] 自动生成 cookie -> {cookie_file.name} ({len(seen)} 个)")
             # 缓存页面元数据（详情 API 被风控时的 title/creator 兜底来源）
             meta = {}
@@ -263,20 +273,30 @@ class DouyinAdapter(PlatformAdapter):
 
     @staticmethod
     def _cookie_file_to_dict(cookie_file: Path) -> dict:
-        """把 Netscape 格式 cookie 文件解析为 {name: value} dict（供 httpx 用）"""
+        """把 Netscape 格式 cookie 文件解析为 {name: value} dict（供 httpx 用）
+
+        注意：必须传 ignore_discard/ignore_expires=True —— 默认参数会丢掉
+        session cookie（expires=0），而抖音登录态里大量关键 cookie 正是
+        session cookie，丢弃后会导致「已登录却仍被风控」。
+        """
         import http.cookiejar
         if not cookie_file or not cookie_file.exists():
             return {}
         try:
             cj = http.cookiejar.MozillaCookieJar(str(cookie_file))
-            cj.load()
+            cj.load(ignore_discard=True, ignore_expires=True)
             return {c.name: c.value for c in cj}
         except Exception:
             return {}
 
     def _any_cached_cookie(self) -> dict:
-        """遍历 cookies 目录，取一个内容最全的缓存 cookie（复用视频 cookie 抓主页）"""
+        """取一份可用的缓存 cookie 抓主页：登录态文件优先，否则取内容最全的匿名缓存"""
         try:
+            login_file = self._login_cookie_file()
+            if login_file.exists():
+                login_cookies = self._cookie_file_to_dict(login_file)
+                if login_cookies:
+                    return login_cookies
             cookie_dir = config.data_dir / "cookies"
             if not cookie_dir.exists():
                 return {}
@@ -292,12 +312,18 @@ class DouyinAdapter(PlatformAdapter):
     def _ensure_cookies(self, vid: str) -> tuple[dict, Path | None]:
         """返回 (cookie 字典, netscape cookie 文件路径)。
 
-        优先级：手动配置 → 本地缓存 → playwright 自动生成。
+        优先级：手动配置 → 登录态文件 → 本地缓存 → playwright 自动生成。
         返回的 cookie 文件路径供 yt-dlp 使用；字典供 httpx 详情 API 使用。
         """
         cfg = self._config_cookies()
         if cfg:
             return cfg, None
+        # 2) 浏览器登录态 Cookie（含登录身份，抓取成功率最高）
+        login_file = self._login_cookie_file()
+        if login_file.exists():
+            login_cookies = self._cookie_file_to_dict(login_file)
+            if login_cookies:
+                return login_cookies, login_file
         cookie_file = self._cookie_file(vid)
         if cookie_file.exists():
             return self._cookie_file_to_dict(cookie_file), cookie_file

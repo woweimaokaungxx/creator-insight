@@ -92,5 +92,7 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 返回 `static/vue/index.html`（Vue 模块化前端） |
+| GET | `/assets/*` | Vue 构建产物（JS / CSS） |
 | GET | `/static/*` | 静态目录挂载 |
 | GET | `/avatars/*` | `data/avatars/` 头像静态暴露 |
+| GET | 其它前端子路由 | **SPA 回退**：返回 `static/vue/index.html`，支持直接访问/刷新 `/monitoring`、`/predictions` 等（`/api`、`/assets`、`/static`、`/avatars` 前缀除外，仍返回 JSON 404） |

@@ -6,6 +6,11 @@ config/config.json
 *.db-wal
 *.db-shm
 
+# 抖音账号登录态（凭据类，绝不入库）
+data/account_status.json
+data/browser_profile/
+data/cookies/
+
 # Python
 __pycache__/
 *.pyc

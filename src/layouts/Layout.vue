@@ -62,6 +62,10 @@
             <template #icon><setting-icon /></template>
             通知设置
           </t-menu-item>
+          <t-menu-item value="/settings">
+            <template #icon><control-platform-icon /></template>
+            系统设置
+          </t-menu-item>
         </t-menu-group>
       </t-menu>
     </t-aside>
@@ -145,6 +149,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import {
+  ControlPlatformIcon,
   DashboardIcon,
   ListIcon,
   NotificationIcon,

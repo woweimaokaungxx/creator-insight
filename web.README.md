@@ -66,4 +66,8 @@ npm run typecheck
 
 ## 生产部署
 
-`npm run build` 产物输出到 `static/vue/`，后端 FastAPI 已挂载 `static` 目录，可直接访问 `http://127.0.0.1:8781/vue/index.html`（或配置路由指向该入口）。
+`npm run build` 产物输出到 `static/vue/`，后端 FastAPI 负责托管：
+
+- 根路径 `http://127.0.0.1:8781/` 返回前端入口
+- `/assets/*` 挂载构建产物（JS / CSS）
+- **SPA 路由回退**：任意前端子路由（如 `/monitoring`、`/predictions`）直接访问或刷新都会返回前端入口，不会 404；`/api`、`/assets`、`/static`、`/avatars` 前缀不受影响

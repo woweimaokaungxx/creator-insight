@@ -16,6 +16,7 @@
     <Notifications v-else-if="activePage === 'notifications'" />
     <Library v-else-if="activePage === 'library'" />
     <Semantic v-else-if="activePage === 'semantic'" />
+    <Settings v-else-if="activePage === 'settings'" />
     <t-card v-else bordered class="placeholder-card">
       <template #title>{{ pageMeta.title }}</template>
       <t-empty
@@ -37,8 +38,9 @@ import Monitoring from './pages/Monitoring.vue';
 import Notifications from './pages/Notifications.vue';
 import Library from './pages/Library.vue';
 import Semantic from './pages/Semantic.vue';
+import Settings from './pages/Settings.vue';
 
-type PageKey = 'dashboard' | 'predictions' | 'creators' | 'monitoring' | 'notifications' | 'library' | 'semantic';
+type PageKey = 'dashboard' | 'predictions' | 'creators' | 'monitoring' | 'notifications' | 'library' | 'semantic' | 'settings';
 
 const activeRoute = ref(normalizeRoute(window.location.pathname + window.location.search));
 
@@ -71,6 +73,10 @@ const pageMetaMap: Record<PageKey, { title: string; description: string }> = {
     title: '语义检索',
     description: '本地 embedding 模型 + 智能检索配置（参考 douyin-creator-distill）。',
   },
+  settings: {
+    title: '系统设置',
+    description: '可视化配置 AI、搜索、通知、Obsidian、抓取监控与验证参数，保存即生效。',
+  },
 };
 
 const activePage = computed<PageKey>(() => {
@@ -80,6 +86,7 @@ const activePage = computed<PageKey>(() => {
   if (activeRoute.value.startsWith('/notifications')) return 'notifications';
   if (activeRoute.value.startsWith('/library')) return 'library';
   if (activeRoute.value.startsWith('/semantic')) return 'semantic';
+  if (activeRoute.value.startsWith('/settings')) return 'settings';
   return 'dashboard';
 });
 

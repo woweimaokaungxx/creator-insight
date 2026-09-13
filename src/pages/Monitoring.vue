@@ -1,5 +1,7 @@
 <template>
   <div class="monitoring-page">
+    <DouyinAccountCard />
+
     <t-card bordered>
       <template #title>关注博主订阅</template>
       <template #actions>
@@ -63,6 +65,7 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue';
+import DouyinAccountCard from '../components/DouyinAccountCard.vue';
 import {
   addSubscription,
   checkSubscription,

@@ -9,16 +9,22 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .adapters import get_adapter, guess_platform
 from .config import config
 from .db import get_conn, init_db
-from .services import creator_monitor, notify as notify_service
+from .services import (
+    account as account_service,
+    creator_monitor,
+    notify as notify_service,
+    settings as settings_service,
+)
 from .services.semantic import semantic_service
 from .services.obsidian import obsidian
 from .services.pipeline import ingest_pipeline
@@ -118,6 +124,19 @@ class SearchRequest(BaseModel):
 class IndexRequest(BaseModel):
     content_ids: list[str] | None = None
     all: bool = True
+
+
+# V0.7 抖音账号与登录态
+class AccountConfigRequest(BaseModel):
+    profile_path: str = ""   # 登录态浏览器目录；留空表示清除
+
+
+class AccountCookieRequest(BaseModel):
+    cookie: str              # "k1=v1; k2=v2"
+
+
+class AccountLoginRequest(BaseModel):
+    profile_path: str = ""   # 可选；留空时用配置值或项目默认目录
 
 
 # ─── 异步 ingest 任务管理 ─────────────────────────────────────
@@ -865,6 +884,83 @@ async def api_monitor_tick():
     return {"ok": True, "ran": len(results)}
 
 
+# ─── V0.7 抖音账号与登录态（参考 douyin-creator-distill 的账号体系）──────
+@app.get("/api/account")
+async def api_account_overview():
+    """账号总览（脱敏：不含 Cookie 明文与浏览器目录绝对路径）"""
+    return account_service.overview()
+
+
+@app.post("/api/account")
+async def api_account_config(req: AccountConfigRequest):
+    """写入账号配置（登录态浏览器目录）"""
+    return account_service.save_profile_path(req.profile_path)
+
+
+@app.post("/api/account/cookie")
+async def api_account_cookie(req: AccountCookieRequest):
+    """手动写入 Cookie：写配置 + 导出 Netscape 文件"""
+    try:
+        return await asyncio.to_thread(account_service.save_cookie, req.cookie)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/account/login")
+async def api_account_login(req: AccountLoginRequest):
+    """启动可见浏览器登录窗口（独立子进程，不阻塞服务）"""
+    try:
+        return await asyncio.to_thread(account_service.start_login, req.profile_path)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"启动登录窗口失败: {exc}") from exc
+
+
+@app.get("/api/account/login/status")
+async def api_account_login_status():
+    """登录阶段（前端轮询：启动中/等待登录/已登录/已超时/窗口已关闭）"""
+    return account_service.read_login_status()
+
+
+@app.post("/api/account/export-cookie")
+async def api_account_export_cookie():
+    """从登录态浏览器目录导出 Cookie 文件（不返回明文）"""
+    try:
+        return await asyncio.to_thread(account_service.export_cookie_from_profile)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"导出 Cookie 失败: {exc}") from exc
+
+
+# ─── V0.12 系统设置（AI / 搜索 / 通知 / Obsidian / 验证参数可视化配置）──────
+@app.get("/api/settings")
+async def api_get_settings():
+    """读取全部可配置段（密钥脱敏）+ 运行时状态"""
+    return settings_service.get_settings()
+
+
+@app.patch("/api/settings")
+async def api_update_settings(req: dict):
+    """局部写入配置：密钥留空/掩码 → 保留原值，null → 清空；写入后热重载运行时"""
+    try:
+        return await asyncio.to_thread(settings_service.update_settings, req)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/settings/ai/test")
+async def api_test_ai_connection():
+    """发一次最小真实请求验证云端 AI 配置是否可用"""
+    try:
+        return await asyncio.to_thread(settings_service.test_ai_connection)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"AI 连接测试失败: {exc}") from exc
+
+
 @app.get("/api/dashboard")
 async def api_dashboard():
     conn = get_conn()
@@ -1013,6 +1109,22 @@ async def index():
     if not vue_index.exists():
         raise HTTPException(503, "前端产物缺失，请先执行 npm run build")
     return FileResponse(vue_index)
+
+
+# V0.7 SPA 路由回退：前端子路由（/monitoring、/predictions 等）直接访问或刷新时
+# 返回前端入口，避免 404；API 与静态资源路径保持原样（仍返回 JSON / 404）
+_SPA_EXCLUDE_PREFIXES = (
+    "/api", "/assets", "/static", "/avatars", "/docs", "/redoc", "/openapi.json",
+)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def spa_fallback_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404 and not request.url.path.startswith(_SPA_EXCLUDE_PREFIXES):
+        vue_index = VUE_DIR / "index.html"
+        if vue_index.exists():
+            return FileResponse(vue_index)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
 # ─── 语义检索（参考 douyin-creator-distill 的智能检索）──────────
