@@ -15,6 +15,17 @@ export interface GroupDef {
   title: string;
   section: string;
   desc?: string;
+  /** 分组顶部的一键开关（可选）：在两组配置值之间整体切换 */
+  quickSwitch?: {
+    label: string;
+    tip?: string;
+    /** 判定为「开」的条件 */
+    when: { path: string[]; equals: unknown };
+    /** 开启时批量写入的字段 */
+    on: Array<{ path: string[]; value: unknown }>;
+    /** 关闭时批量写入的字段 */
+    off: Array<{ path: string[]; value: unknown }>;
+  };
   fields: FieldDef[];
 }
 
@@ -142,6 +153,85 @@ export const SETTINGS_GROUPS: GroupDef[] = [
       { path: ['write_enabled'], label: '启用写出', type: 'switch' },
       { path: ['sync_predictions'], label: '同步预测摘要', type: 'switch' },
       { path: ['sync_verifications'], label: '同步验证报告', type: 'switch' },
+    ],
+  },
+  {
+    title: '本地转写（Whisper）',
+    section: 'transcription',
+    desc: '没有平台字幕时用本地 faster-whisper 转写。开启 GPU 加速后实测比 CPU 快 4~20 倍；若报「cublas64_12.dll not found」，用 pip 装 nvidia-cublas-cu12 / nvidia-cudnn-cu12 / nvidia-cuda-runtime-cu12 即可（程序会自动注入库路径，无需配环境变量）。',
+    quickSwitch: {
+      label: '启用 GPU 加速',
+      tip: '一键切换：开 = cuda + float16 + 批量推理 16（需 NVIDIA 显卡）；关 = cpu + int8 + 关闭批量推理。切换后需点右上「保存全部」生效。',
+      when: { path: ['whisper', 'device'], equals: 'cuda' },
+      on: [
+        { path: ['whisper', 'device'], value: 'cuda' },
+        { path: ['whisper', 'compute_type'], value: 'float16' },
+        { path: ['whisper', 'batch_size'], value: 16 },
+      ],
+      off: [
+        { path: ['whisper', 'device'], value: 'cpu' },
+        { path: ['whisper', 'compute_type'], value: 'int8' },
+        { path: ['whisper', 'batch_size'], value: 0 },
+      ],
+    },
+    fields: [
+      {
+        path: ['whisper', 'device'], label: '运行设备', type: 'select',
+        options: [
+          { label: 'cuda（NVIDIA GPU，推荐）', value: 'cuda' },
+          { label: 'auto（自动探测）', value: 'auto' },
+          { label: 'cpu（通用）', value: 'cpu' },
+        ],
+      },
+      {
+        path: ['whisper', 'compute_type'], label: '精度类型', type: 'select',
+        options: [
+          { label: 'float16（GPU 推荐）', value: 'float16' },
+          { label: 'int8（CPU 最快）', value: 'int8' },
+          { label: 'float32（最高精度）', value: 'float32' },
+        ],
+        tip: 'CPU 用 int8；GPU 用 float16',
+      },
+      {
+        path: ['whisper', 'model'], label: '模型档位', type: 'select',
+        options: [
+          { label: 'tiny（最快）', value: 'tiny' },
+          { label: 'base', value: 'base' },
+          { label: 'small（推荐平衡）', value: 'small' },
+          { label: 'medium', value: 'medium' },
+          { label: 'large-v3（最准）', value: 'large-v3' },
+        ],
+        tip: '显存参考：small≈1GB / medium≈2GB / large-v3≈4GB+',
+      },
+      {
+        path: ['whisper', 'batch_size'], label: '批量推理批大小', type: 'number',
+        tip: '批处理代替逐段串行，吞吐提升数倍并把 GPU 打满；0 = 关闭（GPU 利用率会掉到约 35%）。显存不足时调小',
+      },
+      {
+        path: ['whisper', 'language'], label: '语言', type: 'text',
+        placeholder: '留空自动检测，可填 zh / en',
+      },
+      {
+        path: ['whisper', 'retain_media'], label: '保留中间音频', type: 'switch',
+        tip: '关闭时转写后删除 16kHz wav（原始视频仍保留）',
+      },
+    ],
+  },
+  {
+    title: '平台（B 站登录态）',
+    section: 'platforms',
+    desc: 'B 站 Cookie 用于 CC 字幕与 UP 主投稿目录抓取。留空时字幕大概率拿不到（会回退 Whisper 本地转写），空间接口也容易被风控（-352 / -412）。',
+    fields: [
+      {
+        path: ['bilibili', 'cookie'], label: 'B 站 Cookie', type: 'password',
+        secretKey: 'platforms.bilibili.cookie', placeholder: '留空表示不修改',
+        tip: '格式 k1=v1; k2=v2，至少含 SESSDATA',
+      },
+      { path: ['bilibili', 'enabled'], label: '启用 B 站', type: 'switch' },
+      {
+        path: ['bilibili', 'fetch_video_stats'], label: '批量抓取补全互动数据', type: 'switch',
+        tip: '开启后逐条调 view API 补全点赞/转发/收藏，会显著变慢',
+      },
     ],
   },
   {

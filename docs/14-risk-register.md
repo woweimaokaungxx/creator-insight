@@ -22,7 +22,9 @@
 | 11 | 标的多义性（上证指数 vs 上证 50） | subject.symbol + name 双字段，AI 抽取后人工在 pending_review 时确认 |
 | 12 | 手动修改 Obsidian 区域被覆盖 | frontmatter + auto/human 双层标记 |
 | 13 | 负面证据缺失（搜不到"没发生"） | EvidenceCollector 强制反方向 query + absent_evidence 概念（06 文档） |
-| 14 | API 成本失控 | AI 调用加每日上限与告警 |
+| 14 | API 成本失控 | AI 调用加每日上限与告警（V0.12 已落地 `ai.daily_call_limit` / `daily_call_warn`） |
+| 20 | **任务状态丢失**（服务重启后 `running` / `pending` 任务全部消失，前端轮询 404，用户重复提交并重复消耗 AI 额度） | 任务持久化 + 启动时 `running → queued` 断点恢复；见 `docs/23` §5、`docs/adr/0001` |
+| 21 | **重试放大成本与风控**（失败无分类、无上限地重试，会重复烧 AI 额度并触发平台 403/429） | 错误三分类 + 单条重试上限 3 次 + 退避；`needs_action`（登录失效/验证码/限流/配额）**立即停止不绕过**；见 `docs/23` §1/§3/§7 |
 
 ## 🟨 P2（V0.4+ 考虑）
 

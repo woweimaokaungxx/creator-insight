@@ -29,6 +29,7 @@ SECRET_FIELDS: dict[str, list[tuple[str, ...]]] = {
     "search": [("tavily_api_key",)],
     "notify": [("smtp", "password"), ("webhook_url",)],
     "monitor": [("douyin_cookie",)],
+    "platforms": [("bilibili", "cookie")],
 }
 
 # 可写入的配置段白名单（防止前端写入任意段）

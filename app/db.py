@@ -240,6 +240,86 @@ CREATE TABLE IF NOT EXISTS semantic_index (
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_target ON semantic_index(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_semantic_model ON semantic_index(model_id);
+
+-- V0.13 任务持久化（契约见 docs/22-任务与状态契约.md）：
+-- 任务 / 明细 / 尝试三表。此前 ingest 任务只存在进程内存，服务重启即丢。
+CREATE TABLE IF NOT EXISTS ingest_task (
+  id             TEXT PRIMARY KEY,
+  mode           TEXT NOT NULL DEFAULT 'single',   -- single / all
+  platform       TEXT,
+  raw_input      TEXT,
+  status         TEXT NOT NULL DEFAULT 'queued',   -- 见 docs/22 §3.1
+  stage          TEXT,
+  stage_progress REAL DEFAULT 0,
+  progress       REAL DEFAULT 0,
+  message        TEXT,
+  total          INTEGER DEFAULT 0,
+  succeeded      INTEGER DEFAULT 0,
+  failed_count   INTEGER DEFAULT 0,
+  error          TEXT,
+  result_json    TEXT,                             -- 兼容 GET /api/tasks/{id} 的 result
+  created_at     INTEGER NOT NULL,
+  started_at     INTEGER,
+  finished_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_task_status ON ingest_task(status);
+CREATE INDEX IF NOT EXISTS idx_ingest_task_created ON ingest_task(created_at);
+
+CREATE TABLE IF NOT EXISTS ingest_task_item (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id       TEXT NOT NULL REFERENCES ingest_task(id),
+  content_id    TEXT,                              -- 处理完成后回填；抓取目录阶段为 NULL
+  platform_vid  TEXT,                              -- 平台视频 ID：处理前即可确定，用于去重与待处理过滤
+  title         TEXT,
+  status        TEXT NOT NULL DEFAULT 'queued',    -- 见 docs/22 §3.2
+  stage         TEXT,
+  stage_cn      TEXT,
+  attempt_count INTEGER DEFAULT 0,
+  auto_retry_count INTEGER DEFAULT 0,              -- 仅自动重试计数（docs/23 §3）：重启恢复与人工重试不消耗该额度
+  error         TEXT,
+  error_class   TEXT,                              -- retryable / non_retryable / needs_action
+  updated_at    INTEGER,
+  created_at    INTEGER NOT NULL,
+  UNIQUE(task_id, platform_vid)
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_item_task ON ingest_task_item(task_id);
+CREATE INDEX IF NOT EXISTS idx_ingest_item_status ON ingest_task_item(task_id, status);
+
+CREATE TABLE IF NOT EXISTS ingest_attempt (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id             TEXT NOT NULL,
+  item_id             INTEGER,
+  strategy            TEXT,                        -- platform_subtitle / whisper_local / ...
+  status              TEXT NOT NULL,               -- running / success / failed
+  error_class         TEXT,
+  error               TEXT,
+  artifact_paths_json TEXT,                        -- 产物路径（不得含 Cookie / 密钥，见 docs/22 不变量 #9）
+  started_at          INTEGER,
+  finished_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_attempt_item ON ingest_attempt(item_id);
+
+-- AI 总结产物（版本化，重跑不覆盖；契约见 docs/25-内容总结与版本.md）：
+-- 此前 AI 总结只写 data/transcripts/*_AI总结.md，不入库（前端/检索均无法消费）。
+-- 多模型、多提示词重跑需保留历史版本做对比，故按 content_id + version 版本化，
+-- is_current 标记当前生效版本（同一 content 仅一条为 1）。
+CREATE TABLE IF NOT EXISTS content_summary (
+  id              TEXT PRIMARY KEY,
+  content_id      TEXT NOT NULL REFERENCES content(id),
+  version         INTEGER NOT NULL,
+  summary         TEXT NOT NULL,
+  key_points_json TEXT,
+  word_count      INTEGER,
+  provider        TEXT,                              -- cloud / local
+  model           TEXT,                              -- 生成所用模型
+  prompt_hash     TEXT,                              -- 提示词指纹（换提示词后可对比）
+  task_id         TEXT,                              -- 来源 ingest 任务
+  is_current      INTEGER NOT NULL DEFAULT 1,        -- 1=当前生效；同 content 仅一条
+  created_at      INTEGER NOT NULL,
+  UNIQUE(content_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_content_summary_content ON content_summary(content_id);
+CREATE INDEX IF NOT EXISTS idx_content_summary_current ON content_summary(content_id, is_current);
 """
 
 
@@ -286,6 +366,9 @@ def init_db(db_path: Path | None = None) -> None:
         _ensure_column(conn, "claim", "confidence", "REAL")
         _ensure_column(conn, "claim", "support", "TEXT")
         _ensure_column(conn, "claim", "key_phrase", "TEXT")
+        # V0.13 自动重试额度迁移：明细补「仅自动重试计数」列
+        # （与 attempt_count 分离：重启恢复 / 人工重试不得消耗自动重试额度，见 docs/23 §3）
+        _ensure_column(conn, "ingest_task_item", "auto_retry_count", "INTEGER DEFAULT 0")
         # V0.2 生命周期从 pending_review 开始；兼容 V0.1 留下的 extracted 记录。
         conn.execute(
             "UPDATE prediction SET status='pending_review' WHERE status='extracted'"

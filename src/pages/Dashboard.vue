@@ -52,20 +52,59 @@
               <span v-if="batchStats.failed > 0" style="color:#d54941;">· 失败 {{ batchStats.failed }}</span>
             </div>
 
-            <!-- V0.9 批量明细列表 -->
+            <!-- V0.9 批量明细列表（V0.13：completed / failed 状态 + 失败原因悬停） -->
             <div v-if="batchItems.length" class="batch-list">
               <div
                 v-for="item in batchItems"
                 :key="item.index"
                 class="batch-item"
-                :class="{ current: item.index === (activeTask.currentIndex || 0) && item.status === 'running', done: item.status === 'success', error: item.status === 'error' }"
+                :class="{ current: item.status === 'running', done: item.status === 'completed', error: item.status === 'failed' }"
               >
                 <span class="batch-index">{{ item.index }}</span>
-                <span class="batch-title" :title="item.title">{{ item.title }}</span>
-                <t-tag :theme="itemTheme(item.status, item.stage)" variant="light" size="small">
+                <span class="batch-title" :title="item.error || item.title">{{ item.title }}</span>
+                <t-tag
+                  :theme="itemTheme(item.status, item.stage)"
+                  variant="light"
+                  size="small"
+                  :title="item.error || ''"
+                >
                   {{ item.stage_cn || item.stage || '等待中' }}
                 </t-tag>
               </div>
+            </div>
+
+            <!-- V0.13 任务控制（docs/23 §8）：暂停 / 继续剩余 / 重试失败项 -->
+            <div v-if="canPause || canResume || canRetryFailed" class="task-actions">
+              <t-button
+                v-if="canPause"
+                size="small"
+                variant="outline"
+                :loading="controlling"
+                @click="handlePause"
+              >
+                暂停
+              </t-button>
+              <t-button
+                v-if="canResume"
+                size="small"
+                theme="primary"
+                variant="outline"
+                :loading="controlling"
+                @click="handleResume"
+              >
+                继续剩余
+              </t-button>
+              <t-button
+                v-if="canRetryFailed"
+                size="small"
+                theme="warning"
+                variant="outline"
+                :loading="controlling"
+                @click="handleRetryFailed"
+              >
+                重试失败项（{{ retryableCount }}）
+              </t-button>
+              <span v-if="activeTaskHint" class="task-hint">{{ activeTaskHint }}</span>
             </div>
           </div>
         </t-card>
@@ -120,12 +159,21 @@ import {
   watch,
 } from 'vue';
 import * as echarts from 'echarts';
+import { MessagePlugin } from 'tdesign-vue-next';
 import {
   getDashboard,
+  pauseTask,
+  resumeTask,
+  retryFailedItems,
   submitIngest,
   type DashboardData,
 } from '../api/client';
-import { useIngestTasks, stageToCn } from '../composables/useIngestTasks';
+import {
+  isRunningStatus,
+  stageToCn,
+  taskStatusToCn,
+  useIngestTasks,
+} from '../composables/useIngestTasks';
 
 type Theme = 'default' | 'primary' | 'success' | 'warning' | 'danger';
 
@@ -139,13 +187,17 @@ interface ProcessingTask {
   currentIndex?: number;
 }
 
-// V0.9 批量任务子视频明细
+// V0.9 批量任务子视频明细（V0.13：补失败原因与分类）
 interface BatchItem {
   index: number;
   title: string;
   stage: string;
   stage_cn: string;
   status: string;
+  item_id?: number;
+  error?: string | null;
+  error_class?: string | null;
+  attempt_count?: number;
 }
 
 interface CreatorCardData {
@@ -173,12 +225,93 @@ const activeTask = computed<ProcessingTask | null>(() => {
     id: t.id,
     title: t.result?.title || '解析任务',
     platform: t.mode === 'all' ? '批量' : (t.result?.platform || ''),
-    stage: stageToCn(t.stage) || '处理中',
+    stage: stageToCn(t.stage) || taskStatusToCn(t.status) || '处理中',
     progress: Math.round((t.progress ?? 0) * 100),
-    status: t.status === 'error' ? 'danger' : 'primary',
+    status: t.status === 'failed' || t.status === 'waiting_for_action'
+      ? 'danger'
+      : t.status === 'paused' || t.status === 'partial'
+        ? 'warning'
+        : 'primary',
     currentIndex: t.current_index || 0,
   };
 });
+
+// ─── V0.13 任务控制（docs/23 §8）────────────────────────
+const controlling = ref(false);
+
+const canPause = computed(() => {
+  const t = storeTask.value;
+  return !!t && isRunningStatus(t.status);
+});
+
+const canResume = computed(() => {
+  const t = storeTask.value;
+  return !!t && (t.status === 'paused' || t.status === 'waiting_for_action');
+});
+
+const retryableCount = computed(() => {
+  const t = storeTask.value;
+  return t?.retryable_count ?? t?.failed_count ?? 0;
+});
+
+const canRetryFailed = computed(() => {
+  const t = storeTask.value;
+  return !!t && (t.status === 'partial' || t.status === 'failed') && retryableCount.value > 0;
+});
+
+const activeTaskHint = computed(() => {
+  const t = storeTask.value;
+  if (!t) return '';
+  if (t.status === 'waiting_for_action') return '需人工处理（登录失效 / 验证码 / 限流 / 配额），处理后点「继续剩余」';
+  if (t.status === 'paused') return '已安全暂停，点「继续剩余」处理未完成条目';
+  if (t.status === 'partial') return '批次部分完成，可只重试失败项';
+  return '';
+});
+
+async function handlePause() {
+  const t = storeTask.value;
+  if (!t) return;
+  controlling.value = true;
+  try {
+    await pauseTask(t.id);
+    MessagePlugin.success('已请求暂停，当前视频处理完后停止');
+    await refresh();
+  } catch (e) {
+    MessagePlugin.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    controlling.value = false;
+  }
+}
+
+async function handleResume() {
+  const t = storeTask.value;
+  if (!t) return;
+  controlling.value = true;
+  try {
+    await resumeTask(t.id);
+    MessagePlugin.success('已继续处理剩余条目');
+    await refresh();
+  } catch (e) {
+    MessagePlugin.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    controlling.value = false;
+  }
+}
+
+async function handleRetryFailed() {
+  const t = storeTask.value;
+  if (!t) return;
+  controlling.value = true;
+  try {
+    const res = await retryFailedItems(t.id);
+    MessagePlugin.success(`已重排 ${res.requeued} 条失败项`);
+    await refresh();
+  } catch (e) {
+    MessagePlugin.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    controlling.value = false;
+  }
+}
 
 // 批量明细 items 从 store 的 active task 派生
 const batchItems = computed<BatchItem[]>(() => {
@@ -189,15 +322,16 @@ const batchItems = computed<BatchItem[]>(() => {
 const batchStats = computed(() => {
   const items = batchItems.value;
   return {
-    done: items.filter((i) => i.status === 'success').length,
-    failed: items.filter((i) => i.status === 'error').length,
+    done: items.filter((i) => i.status === 'completed').length,
+    failed: items.filter((i) => i.status === 'failed').length,
     running: items.filter((i) => i.status === 'running').length,
   };
 });
 
 function itemTheme(status: string, stage: string): Theme {
-  if (status === 'success') return 'success';
-  if (status === 'error') return 'danger';
+  if (status === 'completed') return 'success';
+  if (status === 'failed') return 'danger';
+  if (status === 'queued' || status === 'not_started') return 'default';
   if (status === 'running') {
     if (stage === 'transcribe') return 'warning';
     if (stage === 'analyze' || stage === 'simplify' || stage === 'summarize' || stage === 'claims' || stage === 'predictions') return 'primary';
@@ -230,9 +364,24 @@ const processingTasks = computed<ProcessingTask[]>(() => {
         : '完成';
       progress = 100;
       status = 'success';
-    } else if (t.status === 'error') {
+    } else if (t.status === 'partial') {
+      stage = `部分完成 ${t.succeeded ?? 0}，失败 ${t.failed_count ?? 0}`;
+      status = 'warning';
+    } else if (t.status === 'waiting_for_action') {
+      stage = '需人工处理';
+      status = 'danger';
+    } else if (t.status === 'paused' || t.status === 'pausing') {
+      stage = t.status === 'paused' ? '已暂停' : '暂停中';
+      status = 'warning';
+    } else if (t.status === 'interrupted_recoverable') {
+      stage = '待恢复';
+      status = 'warning';
+    } else if (t.status === 'failed') {
       stage = '失败';
       status = 'danger';
+    } else if (t.status === 'queued') {
+      stage = '排队中';
+      status = 'default';
     } else {
       status = stage === 'Whisper 转写' ? 'warning' : 'primary';
     }
@@ -613,6 +762,21 @@ const CalibrationChart = defineComponent({
 
 .batch-item.error {
   background: #fef3f2;
+}
+
+/* V0.13 任务控制区（暂停 / 继续剩余 / 重试失败项） */
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.task-hint {
+  color: #b54708;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .batch-index {

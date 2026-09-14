@@ -25,6 +25,7 @@ const STAGE_CN: Record<string, string> = {
   claims: '观点抽取',
   predictions: '预测抽取',
   analyze: 'AI 分析',
+  retry: '自动重试',        // V0.13 临时故障退避重试（docs/23 §3）
   done: '完成',
 };
 
@@ -33,7 +34,29 @@ export function stageToCn(stage: string): string {
 }
 
 export function isRunningStatus(status: string): boolean {
-  return status === 'pending' || status === 'running';
+  return status === 'queued' || status === 'running' || status === 'pausing';
+}
+
+/** V0.13 需要人工介入的状态（登录失效 / 验证码 / 限流 / 配额 / 已暂停，见 docs/23 §7） */
+export function isActionNeededStatus(status: string): boolean {
+  return status === 'waiting_for_action' || status === 'paused';
+}
+
+const STATUS_CN: Record<string, string> = {
+  queued: '排队中',
+  running: '处理中',
+  pausing: '暂停中',
+  paused: '已暂停',
+  waiting_for_action: '需人工处理',
+  interrupted_recoverable: '待恢复',
+  partial: '部分完成',
+  success: '已完成',
+  failed: '失败',
+};
+
+/** 任务状态中文（V0.13 扩展状态集） */
+export function taskStatusToCn(status: string): string {
+  return STATUS_CN[status] || status || '';
 }
 
 export function useIngestTasks() {
@@ -76,9 +99,11 @@ export function useIngestTasks() {
     await refresh();
   }
 
-  /** 进行中的任务（最新一条 running/pending；后端列表按 created_at 倒序，取第一条） */
+  /** 进行中「或需人工介入」的任务（后端列表按 created_at 倒序，取第一条） */
   const activeTask = computed<IngestTask | null>(() => {
-    return tasks.value.find((t) => isRunningStatus(t.status)) ?? null;
+    return tasks.value.find(
+      (t) => isRunningStatus(t.status) || isActionNeededStatus(t.status),
+    ) ?? null;
   });
 
   /** 是否有任务在跑 */

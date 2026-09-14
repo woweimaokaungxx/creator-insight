@@ -2,7 +2,7 @@
 
 > 博主观点 → 预测 → 事实验证 → 可信度追踪系统
 > 本文记录项目从 2026-08-23 起的全部开发历程、每版改动与清理内容。
-> 最后更新：2026-09-12（V0.12 系统设置页 + V0.11 账号登录态 / AI 切换 MiMo / SPA 路由回退）
+> 最后更新：2026-09-14（V0.15 AI 总结版本化存储 + V0.14 B 站适配器补齐：UP 主投稿目录 / wbi 签名 / 登录态 + V0.13 工程健壮性 + V0.12 系统设置页）
 
 ---
 
@@ -45,6 +45,9 @@ Creator → Content → Transcript → Claim → Prediction → Evidence → Ver
 | V0.10 | 9-11 ~ 9-12 | 仪表盘真实创作者数据 + 头像放大 + 固定导航布局 |
 | V0.11 | 9-12 | 抖音账号登录态（登录 + Cookie 四级策略）+ AI 切换小米 MiMo + SPA 路由回退 |
 | V0.12 | 9-12 | 系统设置页（配置中心）+ 保存即生效热重载 + AI 每日用量上限与告警 |
+| V0.13 | 9-13 | 工程健壮性：任务持久化 + 重试 + 重启断点恢复 + 错误分类 |
+| V0.14 | 9-14 | B 站适配器补齐：UP 主投稿目录（wbi 签名）+ resolve_creator + 登录态 |
+| V0.15 | 9-14 | AI 总结版本化入库（重跑不覆盖 + 多模型/提示词对比）+ 视频库查看总结与历史版本 |
 
 ---
 
@@ -412,8 +415,14 @@ creator-insight/
 | `v05_test.py` | 异步 ingest 任务 + 简体文案保存 | 27 |
 | `v06_test.py` | 抖音账号与登录态：脱敏/配置与文件双写/四级优先级/登录状态机 | 26 |
 | `v07_test.py` | 系统设置：脱敏/掩码保留/深合并/落盘/热重载/用量上限/非法输入 | 29 |
-| `ai_evidence_test.py` | AI 生成证据链兜底 | 8 |
-| **合计** | | **186** |
+| `v08_test.py` | 任务持久化：汇总/吸收态/错误分类/断点恢复/待处理过滤/控制操作/续跑依据/**自动重试策略** | 84 |
+| `v09_test.py` | B 站适配器：wbi 签名/Cookie 与匿名指纹/解析/字段映射/分页/风控退出 | 58 |
+| `v10_test.py` | AI 总结版本化：重跑不覆盖/当前版本唯一/空总结不写/归一化/事务复用 | 33 |
+| `auto_retry_test.py` | 自动重试执行层：真跑重试循环/上限/零重试场景/尝试记录/无明细兜底 | 31 |
+| `reader_test.py` | 内容阅读：逐字稿简体优先与回退/历史总结 md 解析/回填版本化 | 31 |
+| `delete_test.py` | 视频删除：影响面预览/级联清理完整性/隔离性/操作日志保留/幂等 | 38 |
+| `ai_evidence_test.py` | AI 生成证据链兜底 | 6 |
+| **合计** | | **459** |
 
 > 测试使用 `CI_APP__DATA_DIR` 临时目录，不污染真实库。
 
@@ -437,3 +446,368 @@ creator-insight/
 | 🔵 收尾 | 处理库里待确认预测 |
 | 🟢 规划 | V0.5 更多平台 / 多模型 / 多搜索源 / 插件体系 |
 | 🟢 建议 | 爆款拆解 / 选题顾问 / 互动趋势快照 / 博主智能体 |
+| 🟠 规划 | V0.13 工程健壮性：任务持久化 / 重试与错误分类 / 重启断点恢复（设计文档见 `docs/22`、`docs/23`、`docs/adr/0001`） |
+
+---
+
+## 十、V0.13 工程健壮性契约文档（9-13）
+
+本轮为**纯文档产出**（无代码改动），对标参考项目 `douyin-creator-distill` 的 docs 体系，把「工程健壮性」方向的借鉴点固化为契约文档。
+
+**背景问题**：现有异步 ingest 任务是**纯内存**实现（`app/main.py` 的 `_INGEST_TASKS`），
+服务重启即丢、失败即终止（`except` 直接置 `error`）、无重试、无单条断点、无历史记录。
+
+| 新增文档 | 内容 |
+|---------|------|
+| `docs/22-任务与状态契约.md` | 任务 / 明细 / 尝试 / 产物的唯一身份；任务与单条的状态机与合法流转；**10 条不变量**；吸收态与终态保护；待处理集合公式；统计口径统一；与现状实现的 8 条差距对照；`ingest_task` / `ingest_task_item` / `ingest_attempt` 三表设计草案 |
+| `docs/23-任务恢复与重试矩阵.md` | 错误三分类（`retryable` / `non_retryable` / `needs_action`）；12 个场景的策略矩阵（自动动作 / 最大次数 / 是否推进基线 / 用户入口）；重试上限与指数退避；暂停与继续语义；**重启断点恢复**；失败带入规则；**不可绕过原则**；用户入口与落地清单 |
+| `docs/adr/0001-异步任务持久化.md` | 架构决策记录：为何从内存迁移到本地 SQLite（含「内存 + JSON 快照」「外部队列」两个备选方案的取舍），新建 `docs/adr/` 目录 |
+
+**同步更新**：
+
+- `docs/14-risk-register.md`：新增风险 #20「任务状态丢失」、#21「重试放大成本与风控」，应对均指向 `docs/23`
+- `docs/15-roadmap.md`：版本时间线由「只写到 V0.5 的规划」补齐为 **V0.1 ~ V0.13 实际进度**，并标注 V0.13 规划中
+- `README.md`：文档索引补 `docs/22`、`docs/23`、`docs/adr/`；Roadmap 补 V0.13
+- `PROJECT_STATUS.md`：见 §29
+
+**核心设计取舍**（后续编码须遵守）：
+
+1. **吸收态**：任务 `success` 与明细 `completed` 不得被后续失败降级；重试只针对失败条目
+2. **错误三分类**：`needs_action`（登录失效 / 验证码 / 403 / 429 / 配额）**立即停止，不重试也不切换通道绕过**——宁可停住等人工，也不把账号打到风控
+3. **汇总方向唯一**：批次状态由明细汇总，不得反向覆盖明细事实
+4. **口径不得混用**：批次进度读明细、全局计数读聚合，禁止用"最近 N 条任务"推断全局
+
+---
+
+## 十一、V0.13 工程健壮性落地（9-13）
+
+契约文档（第「十」节）落地为代码。
+
+**问题**：异步 ingest 任务是**纯内存**实现（`app/main.py` 的 `_INGEST_TASKS`），服务重启即丢、失败即终止（`except` 直接置 `error`）、无重试、无断点、无历史。
+
+| 模块 | 内容 |
+|------|------|
+| `app/db.py` | 新增三表 `ingest_task` / `ingest_task_item` / `ingest_attempt`（`platform_vid` 唯一键 + 索引） |
+| `app/services/task_store.py`（新增） | 任务与明细读写、**状态机守卫**、**错误三分类**、批次汇总、**启动断点恢复**、待处理过滤、尝试记录、控制操作 |
+| `app/main.py` | 任务读写全部落库（**保留旧函数签名，调用点零改动**）；单条失败**不中断批次**；批量提交前**待处理过滤**；暂停检查；启动 `recover_interrupted()`；新增 3 个控制接口 |
+| 前端 | `useIngestTasks.ts` 扩展状态工具；`Dashboard.vue` 支持 partial / waiting_for_action / paused 展示 + **暂停 / 继续剩余 / 重试失败项**；`Layout.vue` 顶栏徽标扩展 |
+| `scripts/v08_test.py`（新增） | 62 项回归 |
+| `scripts/v05_test.py` | 顺带修复 V0.9 遗留缺陷（FakePipeline 缺 `on_stage`）+ 同步状态断言 |
+
+**落地要点**：
+
+- **吸收态保护**：`completed` 明细与 `success` 任务不可被后续失败降级（实测被守卫拦下并打印拒绝日志）
+- **错误三分类**：`needs_action`（登录失效 / 验证码 / 403 / 429 / 配额）→ 任务置 `waiting_for_action` 并**立即停止批次**，不重试、不切换通道绕过
+- **重启断点恢复**：启动时 `running → queued`，**不增加业务重试次数**（不变量 #10），幂等可重复执行
+- **待处理集合过滤**：批量提交跳过已完成/进行中，历史失败可重入；单条模式视为用户显式重处理意图（不过滤）
+- **缺陷修复**：`raw_input` 未随任务持久化 → 会导致「重试/继续」失效，已修复并端到端复验
+
+**验证**：全量回归 **246 项全绿**（新增 v08 62 项；v05 由坏转绿）；端到端提交/落库/分类/回读/控制路由全部通过；无 lint 错误。
+
+---
+
+## 十二、V0.14 B 站适配器补齐（9-14）
+
+**问题**：B 站此前只实现单视频路径，博主维度完全缺失 —— `fetch_creator_videos` 未实现
+（基类抛 `NotImplementedError`）、`resolve_creator` 不存在（`mode=all` 会 `AttributeError`）、无任何登录态。
+
+**实现**（`app/adapters/bilibili.py`）：
+
+| 能力 | 内容 |
+|------|------|
+| **wbi 签名** | `nav` 接口取 img_key/sub_key → 固定置换表生成 mixin_key → `wts` + `w_rid`(md5)；密钥缓存 1 小时 |
+| **匿名指纹** | 自动调 `x/frontend/finger/spi` 取 `buvid3`/`buvid4` 并缓存（**解决了空间接口的 412**） |
+| `resolve_creator` | 主页链接直接取 mid；视频链接 / BV 号经 `view` API 反查 `owner.mid` |
+| `fetch_creator_videos` | `x/space/wbi/arc/search` 分页：`monitor.per_page` 钳制 1~50、`max_pages` 上限、`max_items` 截断、翻页限速 0.5s |
+| Cookie 配置 | 新增 `platforms.bilibili.cookie`（含系统设置页「平台」分组 + 密钥脱敏） |
+| 字幕 | 请求补 Cookie（此前完全匿名，实际拿不到字幕） |
+| 请求头 | 补 `Origin`，降低 WAF 拦截概率 |
+
+**互动数据说明**：空间接口只提供评论数；点赞/转发/收藏需逐条调 `view` API，
+由 `platforms.bilibili.fetch_video_stats`（默认 false）控制是否补全。
+
+**实测（真实网络）**：
+
+- ✅ wbi 密钥成功获取；`fetch_creator_videos("2", max_items=3)` 返回 3 条真实投稿（含时长 / 评论数）
+- ✅ `fetch_content_meta` 拿全四项互动数据（赞 86812 / 评 8760 / 转 7114 / 藏 11632）
+- ✅ `resolve_creator(视频链接)` → `mid=2, name=碧诗`
+- ✅ **无需用户 Cookie 即可抓取目录**（匿名指纹解决 412）；Cookie 主要用于字幕
+
+**文档**：新增 `docs/24-平台适配器.md`（两平台获取逻辑、Cookie 策略、风控排错对照）。
+
+**测试**：新增 `scripts/v09_test.py`（58 项，全离线：wbi 复算 / Cookie 与指纹 / 输入解析 / 字段映射 / 分页终止 / 风控安全退出）。
+
+---
+
+## 十三、V0.14+ 长视频转写进度修复（9-14）
+
+**发现**：用 84 分钟 B 站视频（`BV1BoM76iEih`）实测，任务已下载音频（67.8MB）并进入转写，
+但任务状态**一直停在「抓取视频元数据」8%**，前端看不到任何进展。
+
+**根因**：单条模式的 `_process_one_video` 调用**漏传 `on_stage` 回调**（批量模式传了），
+导致 `_report()` 全部空转，阶段与进度无法上报。
+
+| # | 修复 | 文件 |
+|---|------|------|
+| 1 | 单条模式补 `on_stage` / `on_progress` 回调 | `app/main.py` |
+| 2 | 新增 `_STAGE_PROGRESS` 阶段→进度映射（parse 2% / download 30% / transcribe 45% / analyze 75% / done 100%） | `app/main.py` |
+| 3 | Whisper 新增 `on_progress(ratio, done_sec, total_sec)`（按片段结束时间 / 音频总时长） | `app/services/transcribe.py` |
+| 4 | 任务消息显示「Whisper 转写 12.5/84.5 分钟（约剩 180 分钟）」（ETA 按已用时间/已完成比例估算） | `app/main.py` |
+| 5 | 单条任务**开始时**就登记明细（此前只在成功后登记），使中断可被续跑识别 | `app/main.py` |
+| 6 | 新增 `_resume_interrupted_tasks`：启动时重新驱动仍有待处理明细的任务（上限 3 个避免惊群）—— 补齐 `docs/22` §5 承诺 | `app/main.py` |
+
+**实测对比**：
+
+```
+修复前：[3.5 分钟无变化] running | fetch_meta  |  8%    | 抓取视频元数据
+修复后：          running | transcribe | 45.36% | Whisper 转写 1.0/84.5 分钟（约剩 183 分钟）
+```
+
+**顺带确认**：84 分钟视频用 CPU `small` 模型转写约需 **3 小时**（≈0.4x 实时），属**硬件限制**；
+已写入 `docs/17-配置与本地转写.md` 的「耗时参考」表与三条加速建议（GPU / 更小模型 / 平台字幕）。
+
+**测试**：`scripts/v08_test.py` 新增 6 项「断点续跑依据」断言（62 → 68）。全量回归 **310 项全绿**。
+
+---
+
+## 十四、Whisper GPU 加速（9-14）
+
+**目标**：把本地转写从 CPU 切到 NVIDIA GPU，解决长视频「CPU 转写要 3 小时」的问题。
+
+**实测对比**（同一 10 秒音频，`small` 模型）：
+
+| 配置 | 转写耗时 | 速度 |
+|------|---------|------|
+| CPU + `int8` | 5.8s | 1.74x 实时 |
+| **GPU(RTX 2060) + `float16`** | **1.4s** | **7.07x 实时** |
+
+→ 约 **4 倍**加速；84 分钟视频预计从 ~3 小时降到 **~12 分钟**。
+
+**关键问题与解决**：直接改 `device: cuda` 会报
+`Library cublas64_12.dll is not found or cannot be loaded` —— 因为只有驱动、没有 CUDA 运行时库，
+且 CTranslate2 **不会**自动搜索 pip 安装的 nvidia 包目录。
+
+| # | 内容 |
+|---|------|
+| 1 | `app/services/transcribe.py` 新增 `setup_cuda_dlls()`：把 `site-packages/nvidia/*/bin` **同时**写入 `os.add_dll_directory()` 与 `PATH`（CTranslate2 内部可能用 `LoadLibraryA`，不读前者），仅 Windows 生效、幂等 |
+| 2 | 在加载模型前按 `device ∈ {cuda, auto}` 自动调用（用户无需手工配环境变量） |
+| 3 | 加载失败时日志带上 `device=` 便于排查 |
+| 4 | 依赖：`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-runtime-cu12`（**无需**系统级 CUDA Toolkit） |
+| 5 | 配置：`transcription.whisper.device=cuda` + `compute_type=float16`；`config.example.json` 与 `requirements.txt` 补充说明与显存参考 |
+
+**实测（项目链路）**：`whisper_transcribe()` 读取配置 → 注入 4 个库目录 → GPU 转写成功，
+产物 md/json/srt 齐全、语言自动识别 `zh`。
+
+**文档**：`docs/17-配置与本地转写.md` 新增「启用 GPU 加速」小节（前置条件、配置、pip 安装、常见报错表）。
+
+---
+
+## 十五、Whisper 批量推理：GPU 利用率与吞吐优化（9-14）
+
+**问题**：GPU 转写时 `nvidia-smi` 显示利用率仅 **29%**（功耗 17W / 上限 90W、SM 645MHz），远未跑满。
+
+**根因**：默认走 `WhisperModel.transcribe()` 的**逐段串行解码** ——
+`condition_on_previous_text=True` 使每一段都依赖前一段输出，GPU 大部分时间在等 CPU。
+
+**方案**：改用 faster-whisper 的 **`BatchedInferencePipeline`**（批处理替代串行）。
+
+**实测**（RTX 2060 / `small` / `float16` / 600 秒音频，同一素材）：
+
+| 方案 | 纯转写 | 速度 | GPU 峰值 | 文本 |
+|------|-------|------|---------|------|
+| A 当前（逐段串行） | 68.4s | 8.8x | 54% | 3043 字 |
+| **B 批量推理 `batch_size=16`** | **15.2s** | **39.5x** | **99%** | 3067 字 |
+| C 批量 + `beam_size=1` + `batch=24` | 7.0s | 85.1x | 97% | 3000 字 |
+
+→ 采纳 **B**：**4.5 倍加速**、GPU 峰值打满、文本量与 A 基本一致。
+
+**改动**：
+
+| # | 内容 | 文件 |
+|---|------|------|
+| 1 | `batch_size > 0` 时用 `BatchedInferencePipeline`，异常自动回退逐段模式 | `app/services/transcribe.py` |
+| 2 | 新增配置 `transcription.whisper.batch_size`（默认 16；0 = 关闭） | `config.json` / `config.example.json` |
+| 3 | 设置页「本地转写」分组新增「批量推理批大小」 | `src/pages/settingsSchema.ts` |
+
+**副作用（需知）**：批量模式下 VAD 分段更粗（片段数 263 → 23，约每段 26 秒），
+SRT 时间戳粒度随之变粗；**文本完整性不受影响**。若需要细粒度时间轴（逐句回听），可设 `batch_size: 0` 回退逐段模式。
+
+**对长视频的意义**：84 分钟视频转写由约 9.5 分钟（串行）降到 **约 3 分钟**（含模型加载）。
+
+---
+
+## 十六、设置页「GPU 加速」一键开关（9-14）
+
+**需求**：开启 GPU 需分别改 `device`、`compute_type`、`batch_size` 三个字段，不够直观。
+
+**实现**：为设置页引入**分组快捷开关**机制（schema 驱动、可复用于其它分组）：
+
+| # | 内容 | 文件 |
+|---|------|------|
+| 1 | `GroupDef` 新增 `quickSwitch`：定义「判定条件 + 开时写入 + 关时写入」三组配置 | `src/pages/settingsSchema.ts` |
+| 2 | 「本地转写（Whisper）」分组接入：**开** = `cuda` + `float16` + `batch_size 16`；**关** = `cpu` + `int8` + `batch_size 0` | 同上 |
+| 3 | `Settings.vue` 渲染开关（含说明文字），切换时批量写入表单并提示「记得保存全部」 | `src/pages/Settings.vue` |
+
+**交互验证**（浏览器实测）：
+
+- 关闭 → 「运行设备」自动变 `cpu（通用）`、「精度类型」变 `int8（CPU 最快）`
+- 打开 → 回切 `cuda（NVIDIA GPU，推荐）` + `float16（GPU 推荐）`
+- 切换只改表单，**仍需点右上「保存全部」**才会落库（避免误改配置）
+
+> 该机制是通用的：任何分组只要声明 `quickSwitch`，即可获得「一键切换多字段」能力。
+
+---
+
+## 十七、V0.15 AI 总结版本化入库（9-14）
+
+**问题**：AI 总结（`summarize` 产出）此前**只写文件**（`data/transcripts/{标题}_AI总结.md`），**不入库**。同一批 AI 响应里其它产出（简体稿 / claims / predictions / 时间解析）全都入库了，只有总结漏了。后果：
+
+- 前端无法展示（视频库、预测页都读接口，接口不返回总结）
+- 语义检索索引不到（只索引库内文本）
+- 删掉 `data/transcripts/` 即永久丢失
+
+**决策**：在「`content` 表加两列」与「单独建表」之间选择**单独建 `content_summary` 表并版本化**——总结是 AI 生成产物，天然带「模型 + 提示词」上下文；换模型（如切到 MiMo）或改提示词后重跑，直接覆盖会让「哪个版本更好」永久失去依据。对齐参考项目「**重跑不覆盖，新报告即新版本**」。
+
+**改动**：
+
+| # | 内容 | 文件 |
+|---|------|------|
+| 1 | 新增 `content_summary` 表：`content_id` + `version` 唯一、`is_current` 标记当前版本、记录 `model` / `provider` / `prompt_hash` / `task_id` | `app/db.py` |
+| 2 | 新增总结存储服务：版本递增、旧版降级、空总结不写、可复用外部事务 | `app/services/summary_store.py`（新） |
+| 3 | 段 3 写入总结（与 claims / predictions 同批提交），`task_id` 由 `_process_one_video` 透传 | `app/services/pipeline.py`、`app/main.py` |
+| 4 | 读取接口：`GET /api/contents/{id}/summary`（当前版本）、`/summary/versions`（历史版本） | `app/main.py` |
+| 5 | 视频库卡片加「AI 总结」入口：弹窗展示版本徽标 / 模型 / 时间 / 正文 / 要点，多版本时可点击切换对比 | `src/pages/Library.vue`、`src/api/client.ts` |
+| 6 | 新增契约文档 | `docs/25-内容总结与版本.md`（新） |
+
+**关键设计**：
+
+1. **重跑不覆盖**：只 `INSERT` 新版本，旧版正文永不 `UPDATE`，仅把 `is_current` 置 0
+2. **当前版本唯一**：「降级旧版 + 插入新版」在同一事务内完成
+3. **空总结不写**：避免空值占用版本号、留下版本空洞
+4. **版本号按视频独立**：`UNIQUE(content_id, version)`，而非全局序列
+5. **必须复用外部事务**：SQLite 单写者，`ingest_pipeline` 段 3 持有写事务时若另开连接写会立刻 `database is locked`
+6. **md 文件仍照常写出**：文件供人工翻阅备份，库内记录供接口与检索消费，两者并存
+
+**测试**：新增 `scripts/v10_test.py`（33 项：版本递增不覆盖 / 当前版本唯一 / 空总结不写 / 归一化 / 无总结老数据 / 版本隔离 / 事务回滚与提交 / 辅助函数）。
+
+**浏览器实测**：写入两版总结后打开视频库 → 弹窗显示 `v2` + `mimo-v2.5` + 正文 + 3 条要点；展开「历史版本（2）」显示 `v2（当前）` 与 `v1`，点击 `v1` 可切回第一版正文对照（旧版内容完整保留）。验证数据随后已清理。
+
+**存量数据**：本版本之前处理的视频没有总结记录（当时未入库，无法回溯）。重新处理该视频即可生成，页面显示空态而非报错。后续扩展方向见 `docs/25` §10。
+
+---
+
+## 十八、V0.13 补齐：单条自动重试（9-14）
+
+**缺口**：`docs/23` §3 契约承诺「临时故障有限重试（退避，上限 3 次）」，但 V0.13 首版只做了**手动**「重试失败项」——单条失败即直接标记 `failed`，`retryable` 的临时故障（超时 / 连接中断）**不会自动恢复**，必须人工介入。
+
+**改动**：
+
+| # | 内容 | 文件 |
+|---|------|------|
+| 1 | 明细新增 `auto_retry_count` 列（仅自动重试计数，与 `attempt_count` 分离）；`init_db` 加轻量迁移 | `app/db.py` |
+| 2 | 策略常量与判定：`MAX_AUTO_ATTEMPTS=3`、`RETRY_BACKOFF_SECONDS=(5,20,60)`、`should_auto_retry()` / `retry_backoff_seconds()` / `mark_auto_retry()` | `app/services/task_store.py` |
+| 3 | 执行层 `_process_with_auto_retry()`：单条与批量共用，失败时退避重试 | `app/main.py` |
+| 4 | 前端「自动重试」阶段中文映射 | `src/composables/useIngestTasks.ts` |
+| 5 | 契约文档标注 §3 已落地，并更正 §9.2 表设计（补 `platform_vid` 与唯一键说明） | `docs/23`、`docs/22` |
+| 6 | 回归测试：v08 §10 新增 16 项 + 新增执行层测试脚本 | `scripts/v08_test.py`、`scripts/auto_retry_test.py`（新） |
+
+**关键设计**：
+
+1. **两个计数器分工**：`attempt_count` 记**执行总次数**（成功 / 失败都计，由执行层**单点维护**，调用方不再 `inc_attempt`）；`auto_retry_count` 只记**自动重试**次数，承载 3 次额度
+2. **为什么必须拆开**：重启恢复与用户手动「重试失败项」都是**合理重跑**，不应消耗自动重试额度 —— 否则服务重启几次后，本可自愈的条目会因额度耗尽被直接判失败
+3. **`needs_action` 零重试**：登录失效 / 验证码 / 403 / 429 / 配额一律**立即抛出**，不重试、不切换通道绕过（§7 不可绕过原则）
+4. **无明细 id 兜底**：单条任务在明细登记失败时拿不到 `item_id`，库内没有计数来源 → 执行层另维护进程内计数并与库内值取大，避免「额度恒为 0 → 无限重试」
+
+**实测**：
+
+- ✅ `scripts/v08_test.py` §10 新增 16 项（上限 3 次 / 退避序列 5-20-60 / 额度不被重启恢复与人工重试消耗 / `completed` 不被自动重试拉回），62 → **84 项**
+- ✅ 新增 `scripts/auto_retry_test.py` **31 项**：真跑重试循环（首次成功零重试 / 2 次失败后成功 / 上限 4 次执行 / `needs_action` 零重试 / `non_retryable` 零重试 / 每次尝试逐条落库 / **无明细 id 仍受上限约束**回归）
+- ✅ 全量回归 **390 项全绿**
+- ✅ 无 lint 错误，前端构建通过
+
+---
+
+## 十九、内容阅读视图 + 存量总结回填（9-14）
+
+**需求**：「AI 总结」与「简体校对版」这两个 md，希望**在前端就能阅读**，不用去翻 `data/transcripts/`。
+
+**发现的两个缺口**：
+
+1. **逐字稿没有接口**：简体校对版其实**早已入库**（`transcript.text_full_simplified`），也写了文件，但**没有任何接口暴露** → 前端读不到
+2. **存量总结只在文件里**：V0.15 才让总结入库，之前处理的视频总结只存在于 md 文件中，页面显示空态
+
+**改动**：
+
+| # | 内容 | 文件 |
+|---|------|------|
+| 1 | 新增 `transcript_store.get_transcript()`：简体校对版优先、回退原始稿，并用 `text_kind` 标明返回的是哪一种 | `app/services/transcript_store.py`（新） |
+| 2 | 新增接口 `GET /api/contents/{id}/transcript` | `app/main.py` |
+| 3 | 新增一次性回填脚本：解析历史 `*_AI总结.md` 入库（预演 / `--apply` / `--force`，幂等） | `scripts/backfill_summaries.py`（新） |
+| 4 | 视频库卡片按钮「AI 总结」→「**阅读**」，弹窗改为 **AI 总结 / 简体校对版** 双标签 | `src/pages/Library.vue`、`src/api/client.ts` |
+| 5 | 新增测试 | `scripts/reader_test.py`（31 项） |
+
+**关键设计**：
+
+1. **回退判定看"有没有内容"而非"字段是否存在"**：早期 `text_full_simplified` 可能是 `NULL` 或空串，二者都应回退原稿
+2. **前端据 `text_kind` 区分展示**：避免把繁体原稿误当成校对稿
+3. **逐字稿刻意不版本化**：它是转写的原始材料（一条视频一份），重跑转写属"重做"而非"新版本"；与总结的版本化策略有意不同
+4. **懒加载**：打开弹窗只拉总结（轻），**切到逐字稿标签才拉正文**（可能上万字），同一视频只拉一次
+5. **回填匹配用同一个文件名函数**：文件 base 与 `_safe_filename(content.title)` 完全一致，可精确匹配无需模糊；未匹配的文件只跳过、不猜测
+6. **回填标注来源**：`provider="file-backfill"` + `prompt_hash="file-backfill"`，与 AI 新生成的版本可区分；`model` 留空（文件里没有该信息）
+
+**实测**：
+
+- ✅ 回填预演：7 个文件中 **6 个精确匹配**（另 1 个是标题空格变体的重复文件，正确跳过）→ `--apply` 写入 6 条 `v1`
+- ✅ 幂等：重复执行全部跳过（已写入 0 / 跳过 6）
+- ✅ 接口实测：「爆肝2个月」→ 总结 `v1`（285 字 + 8 条要点）+ 逐字稿 `simplified` 11797 字（Whisper 本地转写）
+- ✅ 浏览器实测：点「阅读」→ 弹窗双标签；「AI 总结」显示 `v1` + `file-backfill` + 要点 + 复制正文；切「简体校对版」显示 11797 字正文 + 来源 + 复制全文；无总结的视频显示「暂无 AI 总结」空态
+- ✅ `scripts/reader_test.py` **31/31**；全量回归 **421 项全绿**
+- ✅ 无 lint 错误，前端构建通过
+
+---
+
+## 二十、视频删除与数据清理（9-14）
+
+**需求**：把「只抓了目录、没有逐字稿」的视频删掉，并**加上删除功能**。
+
+**背景**：批量抓取博主目录会给每个作品建一条 `content`（标题 / 链接 / 互动数），
+但只有**真正处理过**的视频才有 `transcript`。实测 72 条里有 **63 条**是这样只有元数据的空记录
+（其中 **0 条**有预测、**0 条**有观点 —— 删除不会损失任何分析数据）。
+
+**改动**：
+
+| # | 内容 | 文件 |
+|---|------|------|
+| 1 | 新增删除服务：按依赖顺序清理下游数据，单事务 | `app/services/content_store.py`（新） |
+| 2 | 新增 `DELETE /api/contents/{id}` 与 `GET /api/contents/{id}/delete-preview` | `app/main.py` |
+| 3 | 阅读弹窗加「删除此视频」+ 二次确认（展示将连带删除的数据量） | `src/pages/Library.vue`、`src/api/client.ts` |
+| 4 | 新增批量清理脚本「只抓了目录」的视频 | `scripts/cleanup_empty_contents.py`（新） |
+| 5 | 新增测试 | `scripts/delete_test.py`（38 项） |
+
+**为什么需要专门的删除服务**：SQLite 外键**没有 `ON DELETE CASCADE`**，且 `evidence`
+同时挂在 `prediction_id` 与 `content_id` 上 —— 直接 `DELETE FROM content` 会被外键挡住
+（`FOREIGN KEY constraint failed`）。必须**按依赖顺序**逐层清理：
+
+```
+evidence → verification → prediction → claim → content_summary → transcript → content
+```
+
+额外两个细节：
+
+- **自引用先断开**：`prediction.parent_prediction_id` 指向同表，同批删除可能触发外键冲突 → 先把该字段置 `NULL`
+- **操作日志保留**：`ingest_task_item.content_id` 只是弱引用（无外键），删除时**置 `NULL` 而非删行** —— 任务与尝试历史属于操作日志，不该因作品被删而消失
+
+**清理脚本的安全设计**：
+
+- **默认预演**：不加 `--apply` 只报告，不动数据
+- **安全冗余**：即使没有逐字稿，只要还挂着预测或观点也**默认跳过**（`--include-linked` 才删）
+- **判定口径**：`content` 无对应 `transcript`
+
+**实测**：
+
+- ✅ `scripts/delete_test.py` **38/38**：影响面预览（预测/观点/证据/验证/总结/逐字稿）/ 级联清理逐表无残留 / **不影响其它视频** / 任务明细保留且引用置空 / 重复删除幂等 / 空视频识别
+- ✅ 清理执行：删除 **63** 条（连带预测 0 / 观点 0），剩余 **9** 条（均有逐字稿）
+- ✅ 删除后完整性：预测 **28** / 观点 **170** / 证据 **28** / 总结 **6** 全保留；**孤儿记录 0**
+- ✅ 浏览器实测：临时视频 → 点「阅读」→「删除此视频」→ 二次确认显示「没有分析数据，删除后不可恢复」→ 确认后提示成功、弹窗关闭、列表刷新（临时视频消失）
+- ✅ 全量回归 **459 项全绿**
+- ✅ 删除前已用 `sqlite3.backup` 完整备份数据库（含 WAL）

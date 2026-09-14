@@ -42,6 +42,16 @@
       <template #title>{{ g.title }}</template>
       <p v-if="g.desc" class="group-desc">{{ g.desc }}</p>
 
+      <!-- 分组快捷开关（如「启用 GPU 加速」：一键切换多个字段） -->
+      <div v-if="g.quickSwitch" class="quick-switch">
+        <t-switch
+          :value="quickSwitchOn(g)"
+          @change="onQuickSwitch(g, $event)"
+        />
+        <span class="quick-label">{{ g.quickSwitch.label }}</span>
+        <span class="quick-tip">{{ g.quickSwitch.tip }}</span>
+      </div>
+
       <t-form label-align="top" class="settings-form">
         <t-form-item
           v-for="f in g.fields"
@@ -93,7 +103,7 @@ import {
   updateSettings,
   type SettingsResponse,
 } from '../api/client';
-import { SETTINGS_GROUPS, type FieldDef } from './settingsSchema';
+import { SETTINGS_GROUPS, type FieldDef, type GroupDef } from './settingsSchema';
 
 const groups = SETTINGS_GROUPS;
 const data = ref<SettingsResponse | null>(null);
@@ -114,6 +124,31 @@ function isKeepingSecret(f: FieldDef, value: unknown): boolean {
   const mask = data.value?.mask ?? '****';
   const s = String(value ?? '');
   return s === '' || s.includes(mask);
+}
+
+/** 快捷开关当前是否为「开」 */
+function quickSwitchOn(g: GroupDef): boolean {
+  const qs = g.quickSwitch;
+  if (!qs) return false;
+  return form[keyOf(g.section, qs.when.path)] === qs.when.equals;
+}
+
+/** 模板事件入口（避免内联箭头函数的隐式 any） */
+function onQuickSwitch(g: GroupDef, value: unknown) {
+  toggleQuickSwitch(g, Boolean(value));
+}
+
+/** 切换快捷开关：按 schema 批量写入对应字段（仍需点「保存全部」落库） */
+function toggleQuickSwitch(g: GroupDef, on: boolean) {
+  const qs = g.quickSwitch;
+  if (!qs) return;
+  for (const item of (on ? qs.on : qs.off)) {
+    form[keyOf(g.section, item.path)] = item.value;
+  }
+  MessagePlugin.info(
+    on ? `已切换为「${qs.label}」的开配置，记得点「保存全部」`
+       : `已切换为「${qs.label}」的关配置，记得点「保存全部」`,
+  );
 }
 
 async function load() {
@@ -217,6 +252,30 @@ onMounted(load);
   margin: 0 0 14px;
   color: #667085;
   font-size: 13px;
+  line-height: 1.6;
+}
+
+.quick-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  background: #f8fafc;
+  border: 1px solid #edf1f7;
+  border-radius: 8px;
+}
+
+.quick-label {
+  color: #101828;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.quick-tip {
+  color: #667085;
+  font-size: 12px;
   line-height: 1.6;
 }
 

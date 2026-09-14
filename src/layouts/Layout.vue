@@ -81,7 +81,7 @@
           <!-- V0.10 全局任务进度：任一页面可见，点击跳仪表盘 -->
           <div v-if="activeTask" class="global-task" @click="goDashboard" title="查看任务详情">
             <div class="global-task-head">
-              <span class="global-task-badge" :class="activeTask.status">{{ activeTask.status === 'error' ? '失败' : '处理中' }}</span>
+              <span class="global-task-badge" :class="activeTask.status">{{ globalTaskBadge }}</span>
               <span class="global-task-text">{{ globalTaskLabel }}</span>
               <span class="global-task-pct">{{ globalTaskPct }}%</span>
             </div>
@@ -89,7 +89,7 @@
               :percentage="globalTaskPct"
               theme="line"
               size="small"
-              :status="activeTask.status === 'error' ? 'error' : 'active'"
+              :status="globalTaskProgressStatus"
             />
           </div>
         </div>
@@ -189,6 +189,23 @@ const globalTaskLabel = computed(() => {
 const globalTaskPct = computed(() => {
   const t = activeTask.value;
   return Math.round((t?.progress ?? 0) * 100);
+});
+
+// V0.13 扩展状态集的徽标文案与进度条状态（docs/22 §3.1）
+const globalTaskBadge = computed(() => {
+  const s = activeTask.value?.status ?? '';
+  if (s === 'failed') return '失败';
+  if (s === 'waiting_for_action') return '需人工处理';
+  if (s === 'paused' || s === 'pausing') return '已暂停';
+  if (s === 'partial') return '部分完成';
+  if (s === 'queued') return '排队中';
+  if (s === 'interrupted_recoverable') return '待恢复';
+  return '处理中';
+});
+
+const globalTaskProgressStatus = computed(() => {
+  const s = activeTask.value?.status ?? '';
+  return s === 'failed' || s === 'waiting_for_action' ? 'error' : 'active';
 });
 
 function goDashboard() {

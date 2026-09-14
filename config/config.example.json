@@ -55,9 +55,11 @@
       "model": "small",
       "_model_note": "Whisper 模型档位：tiny(最快~39M)/base(~74M)/small(~244M,推荐平衡)/medium(~769M,更准)/large-v3(最准~1.5G)。首次运行自动下载，路径可设 HF_HOME 或下载到本地缓存",
       "device": "auto",
-      "_device_note": "cpu（通用）/ auto（自动）/ cuda（NVIDIA GPU 加速，需 cuDNN）",
+      "_device_note": "cpu（通用）/ auto（自动探测 GPU）/ cuda（强制 NVIDIA GPU，实测约 4 倍于 CPU）。选 cuda/auto 且未装系统级 CUDA Toolkit 时，用 pip 装运行时库即可：pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-runtime-cu12（程序会自动把 site-packages/nvidia/*/bin 注入 DLL 搜索路径，无需手工配 PATH）。显存参考：small 约 1GB / medium 约 2GB / large-v3 约 4GB+",
       "compute_type": "int8",
-      "_compute_type_note": "CPU 用 int8（最快）；GPU 用 float16；更高精度可用 float32",
+      "_compute_type_note": "CPU 用 int8（最快）；GPU 用 float16（推荐）；更高精度可用 float32",
+      "batch_size": 16,
+      "_batch_size_note": "批量推理批大小（faster-whisper BatchedInferencePipeline）：批处理代替逐段串行，吞吐提升数倍、GPU 可打满。0=关闭（回退逐段模式）。实测 RTX 2060 + small：16 → 约 39x 实时、GPU 峰值 99%；24+beam1 → 约 85x（时间戳粒度更粗、准确率略降）。显存不足时调小或设 0",
       "language": "",
       "_language_note": "可选 zh / en，留空则自动检测",
       "retain_media": false,
@@ -71,7 +73,11 @@
       "enabled": true
     },
     "bilibili": {
-      "enabled": true
+      "enabled": true,
+      "cookie": "",
+      "_cookie_note": "可选：B 站登录后的 Cookie（'k1=v1; k2=v2'，至少含 SESSDATA）。留空时单视频元数据一般仍可用，但 CC 字幕与 UP 主投稿目录容易遇到风控（-352 / -412）。可在前端「系统设置」页的「平台」分组填写",
+      "fetch_video_stats": false,
+      "_fetch_video_stats_note": "抓取 UP 主投稿目录时是否逐条补全点赞/转发/收藏（显著变慢，带 0.3s 限速）；false 时批量结果只含评论数"
     }
   },
   "obsidian": {

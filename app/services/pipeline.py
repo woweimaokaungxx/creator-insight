@@ -17,6 +17,7 @@ from ..ai import (
 from ..config import config
 from ..db import get_conn, log_event
 from ..models import Magnitude, PredictionIn
+from . import summary_store
 from .verification import _ensure_baseline
 
 # 置信度语气词 → 估计概率（校准用：只作为初始值，后续由 calibration 修正）
@@ -422,7 +423,8 @@ def compute_auto_apply(pred: PredictionIn) -> bool:
 def ingest_pipeline(content: ContentInfo, transcript_text: str,
                     segments: list[dict] | None = None,
                     transcript_source: str = "whisper_local",
-                    on_stage: callable = None) -> dict:
+                    on_stage: callable = None,
+                    task_id: str | None = None) -> dict:
     """执行完整抽取管线并入库，返回摘要
 
     注意：AI 调用耗时数分钟，期间绝不持有写事务（否则 uvicorn 服务会
@@ -487,11 +489,22 @@ def ingest_pipeline(content: ContentInfo, transcript_text: str,
 
     # ── 段3：写入抽取结果（新连接，短事务） ──
     conn = get_conn()
+    summary_record = None
     try:
         if simplified_text:
             conn.execute(
                 "UPDATE transcript SET text_full_simplified=? WHERE content_id=?",
                 (simplified_text, content_id),
+            )
+        # AI 总结落库（版本化：重跑生成新版本，旧版保留不覆盖）。
+        # 必须复用本事务——SQLite 单写者，另开连接写会 database is locked。
+        if summary:
+            summary_record = summary_store.save_summary(
+                content_id, summary, conn=conn,
+                provider=(summary.get("provider") if isinstance(summary, dict) else None),
+                prompt_hash=summary_store.prompt_fingerprint(SUMMARIZE_SYSTEM),
+                task_id=task_id,
+                now=now,
             )
         _insert_claims(conn, content_id, claims, now)
         stored_predictions = [
@@ -499,7 +512,9 @@ def ingest_pipeline(content: ContentInfo, transcript_text: str,
         ]
         conn.commit()
         log_event(conn, "content", content_id, "ingested",
-                  json.dumps({"summary": bool(summary), "claims": len(claims),
+                  json.dumps({"summary": bool(summary),
+                              "summary_version": (summary_record or {}).get("version"),
+                              "claims": len(claims),
                               "predictions": len(preds),
                               "simplified": bool(simplified_text)},
                              ensure_ascii=False))
@@ -516,6 +531,7 @@ def ingest_pipeline(content: ContentInfo, transcript_text: str,
         "content_id": content_id,
         "creator_id": creator_id,
         "summary": summary,
+        "summary_record": summary_record,
         "claims": claims,
         "predictions": stored_predictions,
         "transcript_simplified": simplified_text,

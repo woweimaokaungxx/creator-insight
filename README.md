@@ -73,7 +73,7 @@ flowchart LR
 | 提交与仪表盘 | 内容摄入、实时任务进度、核心指标、创作者画像卡、校准散点 |
 | 预测管理 | 待确认 / 验证队列 / 历史 / 全部预测（按视频分组，含观点明细） |
 | 创作者画像 | 正确率、样本量、Brier 校准、分领域正确率、已验证预测明细 |
-| 视频库 | 视频卡片（点赞/评论/转发/收藏）+ 关键词 / 语义双模式检索 |
+| 视频库 | 视频卡片（点赞/评论/转发/收藏）+ 关键词 / 语义双模式检索 + **阅读**（AI 总结 / 简体校对版逐字稿）+ 单条删除 |
 | 语义检索 | 本地 embedding 模型选择、下载、建索引、检索 |
 | 自动监控 | 关注博主、抓取间隔、暂停恢复、最近抓取记录 |
 | 通知设置 | 通道配置与测试发送 |
@@ -233,6 +233,11 @@ creator-insight/
 | [docs/19-系统详解.md](docs/19-系统详解.md) | 系统详解 |
 | [docs/20-账号与登录态.md](docs/20-账号与登录态.md) | 抖音账号登录、Cookie 四种来源与脱敏规则 |
 | [docs/21-系统设置.md](docs/21-系统设置.md) | 配置中心：脱敏读写、保存即生效（热重载）、AI 用量上限 |
+| [docs/22-任务与状态契约.md](docs/22-任务与状态契约.md) | 任务/尝试/明细的唯一身份、状态机与不变量 |
+| [docs/23-任务恢复与重试矩阵.md](docs/23-任务恢复与重试矩阵.md) | 错误三分类与各场景重试、恢复规则 |
+| [docs/24-平台适配器.md](docs/24-平台适配器.md) | 抖音 / B 站 获取逻辑、Cookie 策略与风控排错 |
+| [docs/25-内容总结与版本.md](docs/25-内容总结与版本.md) | AI 总结版本化存储：重跑不覆盖、当前版本唯一、多模型对比 |
+| [docs/adr/](docs/adr/) | 架构决策记录（ADR） |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 完整改动记录 |
 | [docs/code-wiki/](docs/code-wiki/) | 代码级 Wiki（架构 / 模块 / 前端 / API） |
 | [PROJECT_STATUS.md](PROJECT_STATUS.md) | 项目状态与历史改进总结 |
@@ -246,6 +251,10 @@ python scripts/v02_test.py        # V0.2 状态机回归
 python scripts/v03_test.py        # V0.3 画像 / 自动过
 python scripts/v04_test.py        # V0.4 通知 / 监控
 python scripts/v05_test.py        # V0.5 异步任务 / 简体化
+python scripts/v06_test.py        # V0.6 账号与登录态
+python scripts/v07_test.py        # V0.7 系统设置
+python scripts/v08_test.py        # V0.8 任务持久化与恢复
+python scripts/v09_test.py        # V0.9 B 站适配器（wbi 签名 / 目录抓取）
 python scripts/ai_evidence_test.py  # AI 证据链
 ```
 
@@ -276,5 +285,9 @@ python scripts/ai_evidence_test.py  # AI 证据链
 - [x] V0.9-V0.10 预测分组视图 / AI 总结优先展示 / 仪表盘真实数据 / 固定导航布局
 - [x] V0.11 抖音账号登录态（扫码登录 + Cookie 四级策略）+ AI 厂商可切换 + SPA 路由回退
 - [x] V0.12 系统设置页（AI / 搜索 / 通知 / Obsidian / 验证参数可视化配置 + AI 用量上限）
+- [x] V0.13 工程健壮性：任务持久化 + 重试 + 重启断点恢复 + 错误分类（契约见 `docs/22` / `docs/23`，实现见 `app/services/task_store.py`）
+- [x] V0.14 B 站补齐：UP 主投稿目录（wbi 签名 + 匿名指纹）+ `resolve_creator` + 登录态（见 `docs/24`）
+- [x] V0.15 AI 总结版本化存储：重跑不覆盖（旧版保留可对比）+ 视频库「阅读」视图（AI 总结 / 简体校对版逐字稿）+ 存量总结回填（见 `docs/25`）
+- [x] V0.16 视频删除与数据清理：单条删除（连带清理下游数据 + 影响面预览）+ 无逐字稿视频批量清理
 - [ ] 更多平台（快手 / 小红书 / 视频号）
 - [ ] 多模型 / 多搜索源 / 插件体系

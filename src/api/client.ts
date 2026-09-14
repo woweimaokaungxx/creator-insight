@@ -46,28 +46,44 @@ export interface Prediction {
   [key: string]: unknown;
 }
 
+export interface IngestTaskItem {
+  index: number;
+  item_id?: number;
+  title: string;
+  stage: string;
+  stage_cn: string;
+  status: string;                       // queued / running / completed / failed / paused
+  error?: string | null;
+  error_class?: string | null;          // retryable / non_retryable / needs_action
+  attempt_count?: number;
+}
+
 export interface IngestTask {
   id: string;
-  status: 'pending' | 'running' | 'success' | 'error';
+  // V0.13 扩展状态集合（见 docs/22 §3.1）：queued / running / pausing / paused /
+  // waiting_for_action / interrupted_recoverable / partial / success / failed
+  status: string;
   stage: string;
   stage_progress: number;
   progress: number;
   message: string;
   error: string | null;
   created_at: number;
+  started_at?: number | null;
   finished_at: number | null;
   result: IngestResult | null;
   // V0.9 批量任务明细
   mode?: 'single' | 'all';
   total?: number;
   current_index?: number;
-  items?: Array<{
-    index: number;
-    title: string;
-    stage: string;
-    stage_cn: string;
-    status: string;
-  }>;
+  platform?: string;
+  raw_input?: string;
+  // V0.13 汇总与控制
+  succeeded?: number;
+  failed_count?: number;
+  retryable_count?: number;
+  resumable?: boolean;
+  items?: IngestTaskItem[];
 }
 
 export interface IngestResult {
@@ -200,6 +216,26 @@ export function getTasks(limit = 10) {
   return request<{ tasks: IngestTask[] }>(`/tasks?limit=${limit}`);
 }
 
+// ─── V0.13 任务控制（docs/23 §8）────────────────────────
+export function retryFailedItems(taskId: string) {
+  return request<{ ok: boolean; requeued: number; task: IngestTask }>(
+    `/tasks/${taskId}/retry-failed`,
+    { method: 'POST' },
+  );
+}
+
+export function resumeTask(taskId: string) {
+  return request<{ ok: boolean; task: IngestTask }>(`/tasks/${taskId}/resume`, {
+    method: 'POST',
+  });
+}
+
+export function pauseTask(taskId: string) {
+  return request<{ ok: boolean; task: IngestTask }>(`/tasks/${taskId}/pause`, {
+    method: 'POST',
+  });
+}
+
 // ─── 预测 ─────────────────────────────────────────────
 export function getPredictions(status = '', creatorId = '') {
   const params = new URLSearchParams();
@@ -286,6 +322,74 @@ export interface ContentItem {
 
 export function getContents(limit = 50) {
   return request<ContentItem[]>(`/contents?limit=${limit}`);
+}
+
+// V0.15 视频 AI 总结（版本化存储：重跑生成新版本、旧版保留不覆盖）
+export interface ContentSummary {
+  id: string;
+  content_id: string;
+  version: number;
+  summary: string;
+  key_points: string[];
+  word_count: number | null;
+  provider?: string | null;
+  model?: string | null;
+  prompt_hash?: string | null;
+  task_id?: string | null;
+  is_current: boolean;
+  created_at: number;
+}
+
+export function getContentSummary(contentId: string) {
+  return request<{ content_id: string; summary: ContentSummary | null }>(
+    `/contents/${contentId}/summary`,
+  );
+}
+
+export function getContentSummaryVersions(contentId: string) {
+  return request<{ content_id: string; count: number; versions: ContentSummary[] }>(
+    `/contents/${contentId}/summary/versions`,
+  );
+}
+
+// V0.15 逐字稿正文（简体校对版优先，老数据回退原始稿）
+export interface ContentTranscript {
+  content_id: string;
+  text: string | null;
+  text_kind?: 'simplified' | 'raw';
+  has_simplified?: boolean;
+  char_count?: number;
+  source?: string | null;
+  language?: string | null;
+  created_at?: number;
+}
+
+export function getContentTranscript(contentId: string) {
+  return request<ContentTranscript>(`/contents/${contentId}/transcript`);
+}
+
+// V0.16 视频删除（连带清理下游数据，供二次确认展示影响面）
+export interface ContentDeletePreview {
+  content_id: string;
+  title: string;
+  platform: string;
+  predictions: number;
+  claims: number;
+  evidences: number;
+  verifications: number;
+  summaries: number;
+  transcripts: number;
+}
+
+export function previewDeleteContent(contentId: string) {
+  return request<ContentDeletePreview>(`/contents/${contentId}/delete-preview`);
+}
+
+export function deleteContent(contentId: string) {
+  return request<{ ok: boolean; content_id: string; deleted: Record<string, number> }>(
+    `/contents/${contentId}`,
+    { method: 'DELETE' },
+  );
 }
 
 // V0.9 视频观点（claim）——供预测页分组展开展示

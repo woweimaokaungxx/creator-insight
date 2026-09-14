@@ -8,6 +8,12 @@ yt-dlp>=2024.8.6
 playwright>=1.40
 # 可选：本地 Whisper 兜底（体积较大，按需安装）
 # faster-whisper>=1.0
+# 可选：Whisper GPU 加速（NVIDIA 显卡；无需系统级 CUDA Toolkit，pip 装运行时库即可）
+# 启用：config.json 的 transcription.whisper.device=cuda、compute_type=float16
+# 程序会自动把 site-packages/nvidia/*/bin 注入 DLL 搜索路径（无需手工配 PATH）
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12
+# nvidia-cuda-runtime-cu12
 # 可选：财经数据（V0.2 验证引擎）
 # akshare>=1.14
 # yfinance>=0.2.40

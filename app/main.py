@@ -21,9 +21,13 @@ from .config import config
 from .db import get_conn, init_db
 from .services import (
     account as account_service,
+    content_store,
     creator_monitor,
     notify as notify_service,
     settings as settings_service,
+    summary_store,
+    task_store,
+    transcript_store,
 )
 from .services.semantic import semantic_service
 from .services.obsidian import obsidian
@@ -139,61 +143,68 @@ class AccountLoginRequest(BaseModel):
     profile_path: str = ""   # 可选；留空时用配置值或项目默认目录
 
 
-# ─── 异步 ingest 任务管理 ─────────────────────────────────────
+# ─── 异步 ingest 任务管理（V0.13 已持久化，契约见 docs/22）─────────
 # 长视频转写耗时可达十几分钟，同步接口必然超时。
 # 改为：提交即返回 task_id → 后台线程处理 → 前端轮询进度。
-_INGEST_TASKS: dict[str, dict] = {}
-_INGEST_TASKS_LOCK = threading.Lock()
+#
+# V0.13：任务状态由进程内存迁移到 SQLite（app/services/task_store.py），
+# 支持「重启断点恢复 / 错误三分类 / 失败项重试 / 单条失败不中断批次」。
+# 以下四个函数保留旧签名与返回结构，调用点无需改动。
+_LEGACY_STATUS_MAP = {"pending": "queued", "error": "failed"}
+
+# 各处理阶段对应的总体进度（供前端进度条平滑推进）
+_STAGE_PROGRESS: dict[str, float] = {
+    "parse": 0.02,
+    "fetch_meta": 0.08,
+    "transcript": 0.15,
+    "download": 0.30,
+    "transcribe": 0.45,
+    "analyze": 0.75,
+    "simplify": 0.80,
+    "summarize": 0.85,
+    "claims": 0.88,
+    "predictions": 0.92,
+    "save": 0.97,
+    "done": 1.0,
+}
 
 
-def _new_ingest_task() -> str:
+def _new_ingest_task(mode: str = "single", raw_input: str = "") -> str:
     task_id = str(uuid.uuid4())
-    with _INGEST_TASKS_LOCK:
-        _INGEST_TASKS[task_id] = {
-            "id": task_id,
-            "status": "pending",          # pending / running / success / error
-            "stage": "",                  # parse / download / transcribe / analyze / done
-            "stage_progress": 0.0,        # 0~1 阶段内进度
-            "progress": 0.0,              # 0~1 总体进度
-            "message": "",
-            "error": None,
-            "created_at": int(time.time()),
-            "started_at": None,
-            "finished_at": None,
-            "result": None,               # 成功后返回给前端的数据
-            # V0.9 批量任务明细：mode=all 时逐条视频的实时状态
-            "mode": "single",             # single / all
-            "total": 0,                   # 批量总数
-            "current_index": 0,           # 当前处理到第几条
-            "items": [],                  # [{index,title,stage,stage_cn,status}]
-        }
-    return task_id
+    return task_store.create_task(task_id, mode=mode, raw_input=raw_input)
 
 
 def _update_ingest_task(task_id: str, **fields) -> None:
-    with _INGEST_TASKS_LOCK:
-        if task_id in _INGEST_TASKS:
-            _INGEST_TASKS[task_id].update(fields)
+    """更新任务状态与字段（兼容旧调用签名）。
+
+    旧实现可传 `items` / `current_index` —— 现在明细由 task_store 管理，此处忽略。
+    """
+    fields.pop("items", None)
+    fields.pop("current_index", None)
+    status = fields.pop("status", None)
+    if status is not None:
+        status = _LEGACY_STATUS_MAP.get(status, status)
+    task_store.set_task_status(task_id, status, **fields)
 
 
 def get_ingest_tasks(limit: int = 10) -> list[dict]:
-    with _INGEST_TASKS_LOCK:
-        items = sorted(_INGEST_TASKS.values(), key=lambda t: t["created_at"], reverse=True)
-    # 返回副本，避免外部修改内部 dict
-    return [dict(t) for t in items[:limit]]
+    return task_store.list_tasks(limit)
 
 
 def get_ingest_task(task_id: str) -> dict | None:
-    with _INGEST_TASKS_LOCK:
-        t = _INGEST_TASKS.get(task_id)
-        return dict(t) if t else None
+    return task_store.get_task(task_id)
 
 
 def _process_one_video(adapter, content, use_whisper: bool,
-                       on_stage: callable | None = None) -> dict:
+                       on_stage: callable | None = None,
+                       on_progress: callable | None = None,
+                       task_id: str | None = None) -> dict:
     """处理单条视频：字幕 → 转写 → AI 抽取 → Obsidian → 保存文件。
 
     on_stage: 可选回调 on_stage(stage_key, stage_cn)，实时反馈该视频内部步骤。
+    on_progress: 可选回调 on_progress(ratio)，反馈**当前阶段内**的完成比例
+                 （目前仅 Whisper 转写会上报，0~1）。
+    task_id: 所属 ingest 任务，记入 content_summary.task_id 便于追溯来源版本。
     返回 {content_id, creator, title, summary, claims, predictions, ...}
     """
     def _report(stage: str, cn: str) -> None:
@@ -217,7 +228,7 @@ def _process_one_video(adapter, content, use_whisper: bool,
         if not media_path:
             raise ValueError(f"视频下载失败（可能被平台风控或链接失效）: {content.title or ''}")
         _report("transcribe", "Whisper 转写")
-        result = whisper_transcribe(media_path)
+        result = whisper_transcribe(media_path, on_progress=on_progress)
         if not result:
             raise ValueError(f"Whisper 转写失败: {content.title or ''}")
         transcript = type("T", (), {
@@ -233,7 +244,7 @@ def _process_one_video(adapter, content, use_whisper: bool,
     result = ingest_pipeline(
         content, transcript.text_full,
         segments=transcript.segments, transcript_source=transcript_source,
-        on_stage=on_stage,
+        on_stage=on_stage, task_id=task_id,
     )
 
     # Obsidian 写出（best-effort）
@@ -267,35 +278,160 @@ def _process_one_video(adapter, content, use_whisper: bool,
     }
 
 
+def _process_with_auto_retry(*, process_fn, item_id: int | None, task_id: str,
+                             attempt_strategy: str,
+                             on_retry: callable | None = None) -> dict:
+    """执行单条处理；失败时按 docs/23 §3 自动重试。
+
+    规则（与 `task_store` 的策略常量一致）：
+
+    - **只有 `retryable` 才重试**（超时 / 连接中断等临时故障）；
+    - **最多 `MAX_AUTO_ATTEMPTS`(3) 次**，退避 **5s → 20s → 60s**；
+    - `needs_action`（登录失效 / 验证码 / 403 / 429 / 配额）与 `non_retryable`
+      （链接失效 / 作品删除）**立即抛出**，绝不自动重试、也不切换通道绕过；
+    -     自动重试额度只记在 `auto_retry_count`，**重启恢复与人工重试不消耗**它；
+    - 每次都单独写一条 `ingest_attempt`（策略 / 状态 / 错误分类），便于事后排查；
+    - **`attempt_count`（执行次数）由本函数单点维护**：成功、可重试的失败、终局失败
+      都会 +1，调用方**不应**再自行 `inc_attempt`（否则重复计数）。
+
+    重试耗尽或不可重试时**重新抛出最后一次异常**，由调用方决定后续
+    （批量：只标记该条并继续后续；单条：任务置 `failed` / `waiting_for_action`）。
+    """
+    auto_retries = 0          # 本进程内已自动重试次数（与库内值取大，防止无明细时失守）
+    while True:
+        attempt_id = task_store.start_attempt(task_id, item_id, attempt_strategy)
+        try:
+            payload = process_fn()
+        except Exception as exc:
+            err_class = task_store.classify_error(exc)
+            task_store.finish_attempt(attempt_id, "failed", error=str(exc),
+                                      error_class=err_class)
+            item = task_store.find_item(item_id) if item_id else None
+            # 本进程内的重试次数也要计入：无明细 id 时库里没有计数来源，
+            # 只依赖库内值会导致「额度恒为 0 → 无限重试」。
+            used = max(auto_retries, int((item or {}).get("auto_retry_count") or 0))
+            if err_class != task_store.ERROR_RETRYABLE or used >= task_store.MAX_AUTO_ATTEMPTS:
+                # 终局失败：记一次执行（不再重试），随后交由调用方决定任务状态
+                if item_id:
+                    task_store.update_item(item_id, error=str(exc)[:300],
+                                           error_class=err_class, inc_attempt=True)
+                raise
+            wait = task_store.retry_backoff_seconds(used)
+            auto_retries = used + 1
+            if item_id:
+                # 记录失败原因并累加自动重试额度，然后退回待执行
+                task_store.update_item(item_id, error=str(exc)[:300],
+                                       error_class=err_class, inc_attempt=True)
+                task_store.mark_auto_retry(item_id)
+            print(f"[ingest] 第 {used + 1}/{task_store.MAX_AUTO_ATTEMPTS} 次自动重试"
+                  f"（{err_class}），{wait}s 后重试: {str(exc)[:80]}")
+            if on_retry:
+                try:
+                    on_retry(used + 1, wait, exc)
+                except Exception:
+                    pass
+            time.sleep(wait)
+        else:
+            if item_id:
+                task_store.update_item(item_id, inc_attempt=True)
+            task_store.finish_attempt(attempt_id, "success",
+                                      artifact_paths=payload.get("saved_files") or [])
+            return payload
+
+
 def _run_ingest_job(task_id: str, raw_input: str, use_whisper: bool,
                     mode: str = "single") -> None:
-    """后台线程执行的完整 ingest 流程，带进度回调与错误捕获。
+    """后台线程执行的完整 ingest 流程，带进度回调、错误分类与尝试记录。
 
     mode=single：仅解析输入的单条视频。
     mode=all：解析输入链接对应的博主，批量抓取其全部视频并逐个处理。
     """
     _update_ingest_task(task_id, status="running", started_at=int(time.time()))
+    attempt_id = task_store.start_attempt(task_id, None, "single")
     try:
         _update_ingest_task(task_id, stage="parse", progress=0.02,
                             message="识别平台并解析链接")
         platform = guess_platform(raw_input)
         if not platform:
             raise ValueError(f"无法识别平台（支持: douyin, bilibili）: {raw_input[:50]}")
+        _update_ingest_task(task_id, platform=platform)
         adapter = get_adapter(platform)
 
         if mode == "all":
             _run_ingest_job_all(task_id, adapter, raw_input, use_whisper, platform)
+            task_store.finish_attempt(attempt_id, "success")
             return
 
         parsed = adapter.parse_input(raw_input)
-        _update_ingest_task(task_id, stage="fetch_meta", progress=0.08,
+        _update_ingest_task(task_id, stage="fetch_meta",
+                            progress=_STAGE_PROGRESS["fetch_meta"],
                             message="抓取视频元数据")
         content = adapter.fetch_content_meta(parsed)
-        payload = _process_one_video(adapter, content, use_whisper)
+        # V0.14：**开始处理时就登记明细**（此前只在成功后登记），这样长视频中途
+        # 被中断（服务重启）也能被断点续跑识别到，同时统计口径与批量一致。
+        task_store.add_items(task_id, [{
+            "content_id": None,
+            "platform_vid": getattr(content, "platform_vid", None),
+            "title": content.title or "",
+        }])
+
+        # V0.14 修复：单条模式此前**漏传** on_stage/on_progress，导致长视频在
+        # 「下载 / 转写」阶段任务状态一直停在「抓取视频元数据」8%，前端看不到
+        # 真实进度（84 分钟视频表现尤为明显）。
+        _transcribe_started = [0.0]        # 转写阶段起点，用于估算剩余时间
+
+        def _on_stage(stage_key: str, stage_cn: str) -> None:
+            if stage_key == "transcribe":
+                _transcribe_started[0] = time.time()
+            _update_ingest_task(task_id, stage=stage_key, message=stage_cn,
+                                progress=_STAGE_PROGRESS.get(stage_key, 0.1))
+
+        def _on_progress(ratio: float, done_sec: float = 0.0,
+                         total_sec: float = 0.0) -> None:
+            """转写进度：显示「已转写/总时长 + 预计剩余」，避免长视频无反馈"""
+            base = _STAGE_PROGRESS["transcribe"]
+            span = _STAGE_PROGRESS["analyze"] - base
+            msg = "Whisper 转写"
+            if done_sec and total_sec:
+                msg = f"Whisper 转写 {done_sec / 60:.1f}/{total_sec / 60:.1f} 分钟"
+                started = _transcribe_started[0]
+                if started and ratio > 0.01:
+                    eta = (time.time() - started) / ratio * (1 - ratio)
+                    msg += f"（约剩 {eta / 60:.0f} 分钟）"
+            _update_ingest_task(task_id, progress=round(base + span * float(ratio), 4),
+                                message=msg)
+
+        # 明细已在开始时登记，这里只更新状态（唯一键 platform_vid 保证不重复插入）
+        rows = task_store.list_items(task_id)
+        item_id = rows[0]["id"] if rows else None
+
+        def _run_single() -> dict:
+            if item_id:
+                task_store.update_item(item_id, status="running", stage="running",
+                                       stage_cn="开始处理")
+            return _process_one_video(adapter, content, use_whisper,
+                                      on_stage=_on_stage, on_progress=_on_progress,
+                                      task_id=task_id)
+
+        # V0.13 自动重试（docs/23 §3）：失败且可重试时退避后重跑本条
+        payload = _process_with_auto_retry(
+            process_fn=_run_single, item_id=item_id, task_id=task_id,
+            attempt_strategy="whisper_local" if use_whisper else "platform_subtitle",
+            on_retry=lambda n, w, e: _update_ingest_task(
+                task_id, stage="retry",
+                message=f"处理失败，{w}s 后自动重试（{n}/{task_store.MAX_AUTO_ATTEMPTS}）"),
+        )
         payload.update({"ok": True, "task_id": task_id, "platform": platform})
+
+        # 执行次数（attempt_count）已由 _process_with_auto_retry 计数，这里不重复 inc
+        if item_id:
+            task_store.update_item(item_id, status="completed", stage="done",
+                                   stage_cn="完成",
+                                   content_id=payload.get("content_id"))
+
         _update_ingest_task(task_id, status="success", stage="done", progress=1.0,
                             message="处理完成", finished_at=int(time.time()),
-                            result=payload)
+                            result=payload, total=1, succeeded=1, failed_count=0)
         try:
             n_pred = len(payload["predictions"] or [])
             notify_service.send_notification(
@@ -308,14 +444,29 @@ def _run_ingest_job(task_id: str, raw_input: str, use_whisper: bool,
         except Exception:
             pass
     except Exception as exc:
-        _update_ingest_task(task_id, status="error", error=str(exc),
-                            message="处理失败", finished_at=int(time.time()))
-        print(f"[ingest] 任务 {task_id} 失败: {exc}")
+        # V0.13 错误三分类（docs/23 §1）：需人工处理的不得当作普通失败
+        err_class = task_store.classify_error(exc)
+        task_store.finish_attempt(attempt_id, "failed", error=str(exc), error_class=err_class)
+        new_status = ("waiting_for_action"
+                      if err_class == task_store.ERROR_NEEDS_ACTION else "failed")
+        _update_ingest_task(task_id, status=new_status, error=str(exc),
+                            message="需人工处理" if new_status == "waiting_for_action" else "处理失败",
+                            finished_at=int(time.time()))
+        print(f"[ingest] 任务 {task_id} → {new_status}（{err_class}）: {exc}")
 
 
 def _run_ingest_job_all(task_id: str, adapter, raw_input: str,
                         use_whisper: bool, platform: str) -> None:
-    """mode=all：解析博主 → 批量抓取全部视频 → 逐个处理。"""
+    """mode=all：解析博主 → 批量抓取全部视频 → 逐个处理。
+
+    V0.13 契约要点（docs/22、docs/23）：
+
+    - 单条失败只标记该条，批次继续（不整批中断）
+    - 待处理集合过滤：跳过已完成 / 正在处理的作品
+    - 遇到 `needs_action`（登录失效 / 验证码 / 限流 / 配额）立即停止整批，不绕过
+    - 每条开始前检查暂停请求（安全暂停）
+    - 批次最终状态由明细汇总（不变量 #4）
+    """
     try:
         # 解析博主（拿 sec_user_id + 昵称）
         _update_ingest_task(task_id, stage="parse", progress=0.03,
@@ -335,55 +486,106 @@ def _run_ingest_job_all(task_id: str, adapter, raw_input: str,
         if not videos:
             raise ValueError("未获取到该博主的任何视频")
 
+        # V0.13 待处理集合过滤（docs/22 §6）
+        videos, skipped = task_store.filter_pending_videos(platform, videos)
+        if not videos:
+            _update_ingest_task(task_id, status="success", stage="done", progress=1.0,
+                                message=f"所选作品均已完成或正在处理中（跳过 {skipped} 条）",
+                                finished_at=int(time.time()), total=0, succeeded=0,
+                                failed_count=0)
+            return
+
         total = len(videos)
-        done = 0
         ok_count = 0
         fail_count = 0
         errors: list[str] = []
         processed: list[dict] = []
-        # V0.9 初始化子视频明细：全部 pending
-        items = [
-            {"index": i, "title": (v.title or v.platform_vid or f"视频{i}"),
-             "stage": "pending", "stage_cn": "等待中", "status": "pending"}
+
+        # V0.13 明细落库（替代旧内存 items）
+        task_store.add_items(task_id, [
+            {"content_id": None,
+             "platform_vid": getattr(v, "platform_vid", None),
+             "title": (v.title or getattr(v, "platform_vid", "") or f"视频{i}")}
             for i, v in enumerate(videos, start=1)
-        ]
+        ])
+        by_vid = {r["platform_vid"]: r for r in task_store.list_items(task_id)}
         _update_ingest_task(task_id, mode="all", total=total,
-                            current_index=0, items=items)
+                            message=f"共 {total} 条待处理" + (f"（跳过 {skipped}）" if skipped else ""))
 
-        def _update_item(index: int, **fields) -> None:
-            """更新第 index 条子视频状态并写回任务 items（加锁安全）。"""
-            with _INGEST_TASKS_LOCK:
-                t = _INGEST_TASKS.get(task_id)
-                if not t:
-                    return
-                it = t.get("items") or []
-                for item in it:
-                    if item.get("index") == index:
-                        item.update(fields)
-                        break
-                t["items"] = it
+        stopped_for_action = False
+        progress = 0.05
+        for i, content in enumerate(videos):
+            # 安全暂停：当前条处理完后不再取下一条（docs/23 §4）
+            if task_store.is_pause_requested(task_id):
+                task_store.mark_paused(task_id)
+                print(f"[ingest-all] 任务 {task_id} 已暂停，剩余 {total - i} 条")
+                return
 
-        for content in videos:
-            done += 1
+            done = i + 1
             progress = 0.05 + 0.9 * (done / total)
-            idx = done
+            row = by_vid.get(getattr(content, "platform_vid", None))
+            item_id = row["id"] if row else None
             _update_ingest_task(task_id, stage="analyze", progress=progress,
-                                current_index=idx,
                                 message=f"[{done}/{total}] 处理《{(content.title or '')[:20]}》")
-            _update_item(idx, stage="running", stage_cn="开始处理", status="running")
+
             try:
                 def _on_stage(stage_key: str, stage_cn: str) -> None:
-                    _update_item(idx, stage=stage_key, stage_cn=stage_cn, status="running")
-                payload = _process_one_video(adapter, content, use_whisper, on_stage=_on_stage)
-                _update_item(idx, stage="done", stage_cn="完成", status="success")
+                    if item_id:
+                        task_store.update_item(item_id, stage=stage_key,
+                                               stage_cn=stage_cn, status="running")
+
+                def _on_progress(ratio: float, done_sec: float = 0.0,
+                                 total_sec: float = 0.0) -> None:
+                    # 批量：把本条占用的 0.9/total 进度区间按子进度插值
+                    per = 0.9 / total
+                    base = progress - per
+                    msg = f"[{done}/{total}] 处理《{(content.title or '')[:20]}》"
+                    if done_sec and total_sec:
+                        msg += f" · 转写 {done_sec / 60:.1f}/{total_sec / 60:.1f} 分钟"
+                    _update_ingest_task(
+                        task_id, progress=round(base + per * float(ratio), 4),
+                        message=msg)
+
+                def _run_one() -> dict:
+                    if item_id:
+                        task_store.update_item(item_id, status="running", stage="running",
+                                               stage_cn="开始处理")
+                    return _process_one_video(adapter, content, use_whisper,
+                                              on_stage=_on_stage, on_progress=_on_progress,
+                                              task_id=task_id)
+
+                # V0.13 自动重试（docs/23 §3）：临时故障退避重试，最多 3 次；
+                # needs_action / non_retryable 会被立即抛出，交由下面分支处理
+                payload = _process_with_auto_retry(
+                    process_fn=_run_one, item_id=item_id, task_id=task_id,
+                    attempt_strategy="whisper_local" if use_whisper else "platform_subtitle",
+                    on_retry=lambda n, w, e: _update_ingest_task(
+                        task_id, stage="retry",
+                        message=f"[{done}/{total}] 失败，{w}s 后自动重试"
+                                f"（{n}/{task_store.MAX_AUTO_ATTEMPTS}）"),
+                )
+                if item_id:
+                    task_store.update_item(item_id, status="completed", stage="done",
+                                           stage_cn="完成",
+                                           content_id=payload.get("content_id"))
                 processed.append(payload)
                 ok_count += 1
             except Exception as exc:
+                err_class = task_store.classify_error(exc)
+                if item_id:
+                    task_store.update_item(item_id, status="failed", stage="error",
+                                           stage_cn="失败", error=str(exc)[:300],
+                                           error_class=err_class)
                 fail_count += 1
                 errors.append(str(exc)[:120])
-                _update_item(idx, stage="error", stage_cn="失败", status="error")
-                print(f"[ingest-all] 第{done}条失败: {exc}")
+                print(f"[ingest-all] 第{done}条失败（{err_class}）: {exc}")
 
+                # 需人工处理：立即停止整批，不继续、不切换通道绕过（docs/23 §7）
+                if err_class == task_store.ERROR_NEEDS_ACTION:
+                    stopped_for_action = True
+                    break
+
+        summary = task_store.summarize_task(task_id)
         result_payload = {
             "ok": True,
             "task_id": task_id,
@@ -393,15 +595,24 @@ def _run_ingest_job_all(task_id: str, adapter, raw_input: str,
             "total": total,
             "processed": ok_count,
             "failed": fail_count,
+            "skipped": skipped,
             "errors": errors[:20],
             "results": processed,
         }
-        _update_ingest_task(task_id, status="success", stage="done", progress=1.0,
-                            message=f"完成：成功 {ok_count}，失败 {fail_count}（共 {total}）",
-                            finished_at=int(time.time()), result=result_payload)
+        final_status = "waiting_for_action" if stopped_for_action else summary["status"]
+        message = f"完成：成功 {ok_count}，失败 {fail_count}（共 {total}）"
+        if skipped:
+            message += f"，跳过已完成 {skipped}"
+        if stopped_for_action:
+            message = f"已停止，需人工处理（登录/验证码/限流/配额）：成功 {ok_count}，失败 {fail_count}"
+        _update_ingest_task(task_id, status=final_status, stage="done",
+                            progress=1.0 if not stopped_for_action else progress,
+                            message=message, finished_at=int(time.time()),
+                            result=result_payload, total=total,
+                            succeeded=ok_count, failed_count=fail_count)
         try:
             notify_service.send_notification(
-                "博主全部视频处理完成",
+                "博主视频处理完成",
                 f"「{creator_name or creator_key}」{total} 条视频：成功 {ok_count}，失败 {fail_count}",
                 category="auto_process",
                 payload={"task_id": task_id, "mode": "all", "total": total,
@@ -410,9 +621,13 @@ def _run_ingest_job_all(task_id: str, adapter, raw_input: str,
         except Exception:
             pass
     except Exception as exc:
-        _update_ingest_task(task_id, status="error", error=str(exc),
-                            message="处理失败", finished_at=int(time.time()))
-        print(f"[ingest-all] 任务 {task_id} 失败: {exc}")
+        err_class = task_store.classify_error(exc)
+        new_status = ("waiting_for_action"
+                      if err_class == task_store.ERROR_NEEDS_ACTION else "failed")
+        _update_ingest_task(task_id, status=new_status, error=str(exc),
+                            message="需人工处理" if new_status == "waiting_for_action" else "处理失败",
+                            finished_at=int(time.time()))
+        print(f"[ingest-all] 任务 {task_id} → {new_status}（{err_class}）: {exc}")
 
 
 def _safe_filename(name: str, max_len: int = 60) -> str:
@@ -468,7 +683,7 @@ async def api_ingest(req: IngestRequest):
     """
     if not req.input.strip():
         raise HTTPException(400, "输入不能为空")
-    task_id = _new_ingest_task()
+    task_id = _new_ingest_task(req.mode, req.input)
     threading.Thread(
         target=_run_ingest_job, args=(task_id, req.input, req.use_whisper, req.mode),
         daemon=True,
@@ -493,6 +708,53 @@ async def api_task_status(task_id: str):
 @app.get("/api/tasks")
 async def api_tasks_list(limit: int = 10):
     return {"tasks": get_ingest_tasks(limit)}
+
+
+# ─── V0.13 任务控制（docs/23 §8）：重试失败项 / 继续剩余 / 暂停 ────────
+def _restart_task_flow(task_id: str, use_whisper: bool = True) -> None:
+    """重新驱动任务流程：会重新解析链接并按「待处理集合」过滤已完成的条目"""
+    task = get_ingest_task(task_id)
+    if not task:
+        return
+    threading.Thread(
+        target=_run_ingest_job,
+        args=(task_id, task.get("raw_input") or "", use_whisper, task.get("mode") or "single"),
+        daemon=True,
+    ).start()
+
+
+@app.post("/api/tasks/{task_id}/retry-failed")
+async def api_task_retry_failed(task_id: str):
+    """重排失败条目后重启流程（已完成条目会被待处理过滤跳过）"""
+    if not get_ingest_task(task_id):
+        raise HTTPException(404, "任务不存在")
+    n = await asyncio.to_thread(task_store.retry_failed_items, task_id)
+    if n:
+        _restart_task_flow(task_id)
+    return {"ok": True, "requeued": n, "task": get_ingest_task(task_id)}
+
+
+@app.post("/api/tasks/{task_id}/resume")
+async def api_task_resume(task_id: str):
+    """继续：处理剩余条目（跳过已完成）"""
+    if not get_ingest_task(task_id):
+        raise HTTPException(404, "任务不存在")
+    ok = await asyncio.to_thread(task_store.request_resume, task_id)
+    if not ok:
+        raise HTTPException(409, "当前状态不可继续")
+    _restart_task_flow(task_id)
+    return {"ok": True, "task": get_ingest_task(task_id)}
+
+
+@app.post("/api/tasks/{task_id}/pause")
+async def api_task_pause(task_id: str):
+    """安全暂停：当前视频处理完后停止（docs/23 §4）"""
+    if not get_ingest_task(task_id):
+        raise HTTPException(404, "任务不存在")
+    ok = await asyncio.to_thread(task_store.request_pause, task_id)
+    if not ok:
+        raise HTTPException(409, "当前状态不可暂停")
+    return {"ok": True, "task": get_ingest_task(task_id)}
 
 
 @app.get("/api/predictions")
@@ -769,6 +1031,64 @@ async def api_content_claims(content_id: str):
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+# ─── V0.15 AI 总结读取（版本化存储，见 docs/25-内容总结与版本.md）──────
+@app.get("/api/contents/{content_id}/summary")
+async def api_content_summary(content_id: str):
+    """返回该视频**当前生效**版本的 AI 总结（含要点）。
+
+    总结按版本化存储：重跑生成新版本、旧版保留不覆盖。
+    此处只取 is_current=1 的那条；历史版本走 `/summary/versions` 对比。
+    无总结时返回 `summary: null`（不视为错误，老视频可能尚未生成）。
+    """
+    record = await asyncio.to_thread(summary_store.get_current_summary, content_id)
+    return {"content_id": content_id, "summary": record}
+
+
+@app.get("/api/contents/{content_id}/summary/versions")
+async def api_content_summary_versions(content_id: str):
+    """列出该视频的全部总结版本（新→旧），供多模型 / 多提示词产出对比。"""
+    versions = await asyncio.to_thread(summary_store.list_versions, content_id)
+    return {"content_id": content_id, "count": len(versions), "versions": versions}
+
+
+@app.get("/api/contents/{content_id}/transcript")
+async def api_content_transcript(content_id: str):
+    """返回该视频的逐字稿正文（供前端直接阅读）。
+
+    优先返回 **AI 简体校对版**；老数据没有简体版时回退原始逐字稿，
+    并用 `text_kind` 标明当前返回的是哪一种（见 `app/services/transcript_store.py`）。
+
+    无逐字稿时返回 `text: null`（该视频可能只抓了目录、尚未处理）。
+    """
+    result = await asyncio.to_thread(transcript_store.get_transcript, content_id)
+    return result if result else {"content_id": content_id, "text": None}
+
+
+@app.get("/api/contents/{content_id}/delete-preview")
+async def api_content_delete_preview(content_id: str):
+    """删除前预览影响面：会连带删除多少条预测 / 观点 / 证据 / 总结。
+
+    前端在二次确认弹窗中展示这些数字，避免误删带走分析数据。
+    """
+    result = await asyncio.to_thread(content_store.preview_delete, content_id)
+    if not result:
+        raise HTTPException(404, "视频不存在")
+    return result
+
+
+@app.delete("/api/contents/{content_id}")
+async def api_delete_content(content_id: str):
+    """删除视频及其全部下游数据（**不可恢复**）。
+
+    连带删除：逐字稿 / 观点 / 预测 / 证据 / 验证 / AI 总结。
+    任务与尝试历史**保留**（明细只断开 `content_id` 引用，不丢操作日志）。
+    """
+    result = await asyncio.to_thread(content_store.delete_content, content_id)
+    if not result:
+        raise HTTPException(404, "视频不存在")
+    return {"ok": True, **result}
 
 
 # ─── V0.4 关注监控（参考 douyin-creator-distill 的「关注与更新」）────────
@@ -1078,11 +1398,40 @@ def _backfill_content_stats() -> int:
     return fixed
 
 
+def _resume_interrupted_tasks(limit: int = 3) -> int:
+    """V0.14 断点续跑：重启后重新驱动未完成的任务（docs/22 §5）。
+
+    只处理「状态为 queued 且仍有待处理明细」的任务，并限制并发数量，
+    避免重启瞬间惊群。无 `raw_input` 的历史任务跳过（无法重跑）。
+    """
+    resumed = 0
+    for task in task_store.list_tasks(limit=20):
+        if resumed >= limit:
+            break
+        if task["status"] != "queued" or not task_store.has_pending_items(task["id"]):
+            continue
+        raw = (task.get("raw_input") or "").strip()
+        if not raw:
+            continue
+        print(f"[ingest] 断点续跑 {task['id'][:8]}（mode={task.get('mode')}）")
+        threading.Thread(
+            target=_run_ingest_job,
+            args=(task["id"], raw, True, task.get("mode") or "single"),
+            daemon=True,
+        ).start()
+        resumed += 1
+    return resumed
+
+
 @app.on_event("startup")
 async def start_scheduler():
     global _scheduler_task
     await asyncio.to_thread(backfill_missing_baselines)
     await asyncio.to_thread(_backfill_content_stats)
+    # V0.13 断点恢复：上次中断的 running 任务/明细退回 queued（docs/23 §5）
+    await asyncio.to_thread(task_store.recover_interrupted)
+    # V0.14 断点续跑：重新驱动仍有待处理明细的任务
+    await asyncio.to_thread(_resume_interrupted_tasks)
     if config.get("verification", "scheduler_enabled", default=True):
         _scheduler_task = asyncio.create_task(_scheduler_loop())
     # V0.4 关注监控调度器

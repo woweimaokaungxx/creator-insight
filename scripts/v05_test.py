@@ -70,7 +70,8 @@ class FakePipeline:
     def __init__(self):
         self.pred = {"id": "p1", "raw_text": "测试预测", "confidence_score": 0.9}
 
-    def ingest_pipeline(self, content, text, segments=None, transcript_source="whisper_local"):
+    def ingest_pipeline(self, content, text, segments=None, transcript_source="whisper_local",
+                        on_stage=None, **kwargs):
         return {
             "content_id": "c_fake", "creator_id": "cr_fake",
             "summary": "测试总结", "claims": [{"text": "观点"}],
@@ -82,10 +83,10 @@ class FakePipeline:
 print("== 1. 任务创建 ==")
 t1 = main._new_ingest_task()
 t = main.get_ingest_task(t1)
-check("创建后 status=pending", t["status"] == "pending")
+check("创建后 status=queued（V0.13 契约）", t["status"] == "queued")
 check("有 id", t["id"] == t1)
 check("created_at 有值", t["created_at"] > 0)
-check("初始 stage 为空", t["stage"] == "")
+check("初始 stage=parse", t["stage"] == "parse")
 check("初始 progress=0", t["progress"] == 0.0)
 
 print("== 2. 状态机 + 进度更新 ==")
@@ -142,7 +143,7 @@ main.guess_platform = lambda s: "douyin"
 main._run_ingest_job(t2, "bad input", True)
 main.get_adapter = orig_get_adapter
 t = main.get_ingest_task(t2)
-check("失败 status=error", t["status"] == "error")
+check("失败 status=failed（V0.13 契约）", t["status"] == "failed")
 check("失败有 error 信息", t["error"] and "平台错误" in t["error"])
 check("失败 finished_at 有值", t["finished_at"] > 0)
 
